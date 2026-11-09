@@ -1,0 +1,25 @@
+# Environnement Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
+
+# PDF d'entrée : documents de tiers (droits d'auteur), gardés en local pour les essais
+*.pdf
+pdfs/
+
+# Sorties et traces d'exécution (régénérables, contiennent le texte des PDF)
+sortie/
+sortie_*/
+*_assets/
+.vlm_cache.json
+_resume.json
+*.report.json
+run.log
+*.log
+
+# Données de test locales (dérivées des PDF)
+tests/fixtures/

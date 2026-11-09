@@ -1,0 +1,5 @@
+# Dépendances directes. Versions exactes testées : requirements.lock
+# Le correctif CSV Granite (P1) vise une fonction interne de Docling 2.149 : garder cette version.
+docling[vlm]==2.149.0
+requests
+pillow
