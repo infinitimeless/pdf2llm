@@ -261,6 +261,45 @@ def test_vector_refuse_si_un_nombre_reste_inexplique():
 
 
 # --------------------------------------------------------------------------------------
+# Triage et repli Granite
+# --------------------------------------------------------------------------------------
+def test_triage_type_de_pdf():
+    P = p.PageProfile
+    slides = [P(i, 900, 0.02, 40, True) for i in range(1, 11)]
+    text = [P(i, 3000, 0.0, 5, False) for i in range(1, 11)]
+    scan = [P(i, 0, 0.98, 0, False) for i in range(1, 11)]
+    assert p.pdf_kind(slides) == "présentation"
+    assert p.pdf_kind(text) == "texte"
+    assert p.pdf_kind(scan) == "scan"
+
+
+def test_triage_profil_depuis_un_pdf():
+    _, tmp = _vec()
+    path = _pdf([_txt(60, 400, "Bonjour " * 40), _rect(100, 100, 50, 50, TEAL)], tmp / "t.pdf")
+    (pr,) = p.profile_pages(path, 1, 1)
+    assert pr.page == 1 and pr.chars > 200 and pr.paths == 1 and pr.img_area == 0 and pr.landscape
+
+
+def test_granite_hors_du_convertisseur_principal():
+    """Le convertisseur principal n'exécute plus Granite ; seul celui de repli le fait."""
+    from docling.datamodel.base_models import InputFormat
+    args = NS(no_ocr=False, no_cell_matching=False, no_vlm=True, no_table_fallback=False,
+              images_scale=2.0, charts="docling", chart_api_url=None, mlx=False)
+    opts = lambda c: c.format_to_options[InputFormat.PDF].pipeline_options  # noqa: E731
+    assert opts(p.build_converter(args)).do_chart_extraction is False
+    assert opts(p.build_converter(args, charts=True)).do_chart_extraction is True
+    assert opts(p.build_converter(args)).do_ocr is True
+    pool = p.ConverterPool(args)
+    assert pool.get() is pool.get() and pool.get(charts=True) is not pool.get()
+
+
+def test_granite_rapprochement_des_boites():
+    assert p._iou((0, 0, 10, 10), (0, 0, 10, 10)) == 1
+    assert p._iou((0, 0, 10, 10), (20, 20, 30, 30)) == 0
+    assert 0.6 < p._iou((0, 0, 10, 10), (1, 1, 10, 11)) < 0.95
+
+
+# --------------------------------------------------------------------------------------
 # Tests sur un vrai export Docling (sautés si la fixture est absente)
 # --------------------------------------------------------------------------------------
 def _fixture_doc():

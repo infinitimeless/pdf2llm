@@ -29,6 +29,12 @@ Dans une présentation exportée en PDF, un graphique n'est pas une image : les 
 
 Règle de sûreté : le tableau n'est utilisé que si **tous** les nombres visibles de la zone et toutes les barres sont expliqués. Sinon l'image suit le chemin habituel ci-dessous, et la raison est notée dans `_debug/*.pictures.json`. La lecture prend quelques millisecondes par graphique.
 
+### Triage et repli Granite Vision
+
+- **Triage** : avant la conversion, chaque PDF est profilé en quelques millisecondes (texte par page, images, formes) et classé `texte`, `présentation` ou `scan` (champ `kind` du rapport).
+- **Granite Vision n'est qu'un repli** : la conversion principale ne l'exécute plus. Seules les pages dont un graphique n'a pas été lu en vectoriel sont reconverties avec Granite (champ `granite_pages` du rapport). Un PDF de texte ne charge donc jamais Granite, et les 15 pages de slides de test passent de 167 s à 22 s.
+- **L'OCR reste activé partout** : celui de Docling est sélectif (régions sans texte PDF, pages au texte cassé ou scannées) et ne coûte qu'environ 5 s par PDF. Mesuré sur un rapport de texte pur, le couper ferait perdre des intertitres pourtant présents dans le PDF.
+
 ### Contrôles qualité
 
 Contrôles appliqués aux sorties des modèles (détail dans [debug_note.md](debug_note.md)) :
@@ -83,7 +89,7 @@ Le script peut être interrompu et relancé : les PDF déjà convertis sont saut
 |---|---|
 | `nom.md` | Le Markdown pour le LLM |
 | `nom_assets/*.webp` | Images conservées (photos, cartes…), selon `--keep-images` |
-| `nom.report.json` | Bilan du PDF : décision par type d'image, tokens estimés, lignes de bruit retirées, avertissements (tableaux à vérifier ou corrigés) |
+| `nom.report.json` | Bilan du PDF : type (`texte`, `présentation`, `scan`), décision par type d'image (`vector`, `chart_table`, `vlm`…), pages reconverties par Granite, tokens estimés, lignes de bruit retirées, avertissements |
 | `_resume.json` | Bilan de tous les PDF |
 | `_debug/` | Avec `--dump-debug` : `*.docling.json` (document Docling complet) et `*.pictures.json` (classe, page, boîte, décision, sortie brute du modèle, note de chaque image) |
 
@@ -100,7 +106,7 @@ Le script peut être interrompu et relancé : les PDF déjà convertis sont saut
 | `--mlx` | Force le preset MLX de Granite Vision (inutile en pratique : choisi automatiquement si `mlx-vlm` est installé) |
 | `--keep-images none / visual / all` | WebP conservés : aucun / photos, captures, cartes, plans (défaut) / tous |
 | `--no-vlm` | Sans modèle vision : graphiques en tableaux, le reste gardé en WebP |
-| `--no-ocr` | PDF natifs (non scannés) : plus rapide |
+| `--no-ocr` | Coupe l'OCR. **Déconseillé** : gain d'environ 5 s par PDF, mais Docling perd alors du texte (intertitres, puces), même dans des PDF natifs |
 | `--chunk-pages 40` | Convertit par tranches (moins de RAM ; défaut 80) |
 | `--no-table-fallback` | Ne fait pas relire par le modèle vision les tableaux à grille irrégulière |
 | `--no-denoise` | Garde numéros de slide et logo lu par l'OCR |
@@ -138,13 +144,14 @@ Ces fichiers ne sont pas versionnés. Les valeurs attendues correspondent à ce 
 | Correctif Granite | `tolerant_csv_to_dataframe` remplace une fonction interne de Docling 2.149 (libellés avec virgule) |
 | Décision par image | `decide_pictures` : lecture vectorielle d'abord, puis arbre de décision habituel, appels parallèles au modèle vision |
 | Sérialisation | Sérialiseurs Markdown de Docling surchargés pour substituer images et tableaux |
+| Triage, repli Granite | `profile_pages`, `pdf_kind`, `ConverterPool` (convertisseurs créés à la demande), `granite_fallback` (reconversion des seules pages à graphique non lu) |
 | Conversion, `main` | Options du convertisseur, découpage en tranches, rapports, reprise |
 
 ## Limites connues et pistes
 
 - Les seuils des contrôles ont été calibrés sur un seul document (sondage Ifop) ; à valider sur d'autres PDF.
 - `fixed_table_md` ne reconnaît que le motif Ifop « marges d'erreur ».
-- La lecture vectorielle couvre les barres (simples, empilées, horizontales ou verticales) et les secteurs. Les **courbes** (séries distinguées par la couleur du texte des valeurs) et les grands **tableaux dessinés en texte libre** ne sont pas encore lus : ils passent par Granite Vision.
+- La lecture vectorielle couvre les barres (simples, empilées, horizontales ou verticales) et les secteurs. Les **courbes** (séries distinguées par la couleur du texte des valeurs) et les grands **tableaux dessinés en texte libre** ne sont pas encore lus : ils passent par Granite Vision, qui les restitue mal (rapport Ipsos p. 57 : une seule des séries retrouvée).
 - Le **texte masqué** n'est écarté que dans les graphiques ; hors graphique, Docling l'extrait encore comme du texte normal.
 
 Historique des versions, problèmes rencontrés et vérifications : [debug_note.md](debug_note.md).

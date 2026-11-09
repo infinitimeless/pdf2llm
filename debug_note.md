@@ -1,6 +1,6 @@
-# pdf2llm.py : note de débogage n° 4 (9 novembre 2026)
+# pdf2llm.py : note de débogage n° 5 (9 novembre 2026)
 
-Remplace la note n° 3. **État du code : v6** = v5.1 + lecture vectorielle des graphiques (`vector_charts.py`). `PROMPT_VERSION = "v5"` : les consignes du modèle vision n'ont pas changé, le cache reste valable. Les vérifications du § 6 ont été faites sur la v6.
+Remplace la note n° 4. **État du code : v7** = v6 (lecture vectorielle des graphiques, `vector_charts.py`) + triage des PDF + Granite Vision en simple repli. `PROMPT_VERSION = "v5"` : les consignes du modèle vision n'ont pas changé, le cache reste valable. Les vérifications du § 6 ont été faites sur la v7.
 
 ---
 
@@ -23,7 +23,8 @@ Fichier de développement : sondage Ifop de 21 pages au format slides, pages 1 �
 | 5 | v4 | 206 s | 4 087 | Anneau p. 9 **faux** (associations inversées, voir § 4). Tableau p. 4 : relecture VLM jugée douteuse. |
 | 6 | v5 | 237 s | 4 287 | Anneau p. 9 et titres avalés : OK. Tableau p. 4 **non corrigé** (en-tête sur 3 lignes, voir § 4.7). Logo « Oifop » repris deux fois comme titre. |
 | 7 | v5.1 | 167 s | 4 209 | Tableau p. 4 corrigé, « Oifop » retiré. |
-| 8 | v6 | 167 s | 4 998 | **18 graphiques sur 18 lus dans la géométrie du PDF**, aucun recours à Granite ni Qwen pour les remplacer. Anneaux rattachés, intertitres conservés. Voir § 6. |
+| 8 | v6 | 167 s | 4 998 | **18 graphiques sur 18 lus dans la géométrie du PDF**, aucun recours à Granite ni Qwen pour les remplacer. Anneaux rattachés, intertitres conservés. |
+| 9 | v7 | **22 s** | 4 998 | Même Markdown, octet pour octet. Granite n'est plus exécuté pendant la conversion : aucun repli nécessaire sur ces pages. Voir § 6. |
 
 ## 3. Correctifs appliqués
 
@@ -43,6 +44,8 @@ Fichier de développement : sondage Ifop de 21 pages au format slides, pages 1 �
 | Logo dans les titres (v5.1) | « *Oifop* » repris comme titre (logo dans la boîte de l'image) | `denoise_markdown` filtre aussi les lignes de titres en italique | Oui |
 | Rapport (v5.1) | p. 4 signalée à la fois « à vérifier » et « corrigée » | `table_warnings` ignore les tableaux corrigés | Test unitaire seulement |
 | Debug (v5.1) | Images du JSON écrites dans `sortie/_debug/sortie/_debug/…` | `dump_debug` passe un chemin absolu à Docling | Oui |
+| Granite en repli (v7) | Granite Vision tournait sur tous les graphiques pendant la conversion Docling, même ceux lus en vectoriel (environ 2 min 30 pour 15 slides) | Extraction de graphiques coupée dans le convertisseur principal ; `granite_fallback` reconvertit seulement les pages dont un graphique n'a pas été lu, et ses tableaux sont rapprochés des images par recouvrement de boîtes (IoU ≥ 0,5). Convertisseurs créés à la demande (`ConverterPool`) : Granite n'est jamais chargé pour un PDF de texte | Oui : Ifop 167 s → 22 s ; Ipsos p. 55-60 : repli sur les seules p. 56-57 |
+| Triage (v7) | Savoir quel genre de PDF on traite | `profile_pages` / `pdf_kind` (pypdfium2) : `texte`, `présentation` ou `scan`, inscrit dans le rapport (`kind`, `granite_pages`) | Oui (3 PDF) |
 | Lecture vectorielle (v6) | Associations fausses (Qwen), intertitres et colonnes « Total » perdus (Granite), en-têtes en anglais | `vector_charts.py` : secteurs et segments empilés rattachés par la couleur de la légende ; barres simples par la position ; intertitres en colonne « Groupe » ; texte invisible écarté par le rendu. Utilisé seulement si tous les nombres visibles et toutes les barres sont expliqués, sinon chemin habituel (`--no-vector` pour le couper) | Oui (18/18, pages 1 à 15) |
 
 ## 4. Ce qu'on a appris (à ne pas redécouvrir)
@@ -57,19 +60,28 @@ Fichier de développement : sondage Ifop de 21 pages au format slides, pages 1 �
 8. **Les slides exportées de PowerPoint sont vectorielles.** Dans le PDF de développement et dans le rapport Ipsos, la seule image bitmap par page est un logo ; barres et secteurs sont des formes vectorielles avec une couleur de remplissage, et toutes les valeurs sont dans la couche texte. Vérifié sur l'anneau p. 9 avec `pypdfium2` : chaque valeur est à l'intérieur du secteur de sa couleur, et chaque couleur correspond au carré de légende placé devant son libellé. L'association est donc exacte, sans modèle, sans estimer de centre ni d'angle (et cohérente avec « Total Proche 13 % = 2 + 11 »). Dans le rapport Ipsos, les courbes se distinguent par la **couleur du texte** des valeurs, identique à celle du titre de la série.
 9. **Le texte « non affiché » (P5) est bien invisible.** Les blocs concernés ont un mode de rendu normal et une couleur visible, mais rien n'apparaît sur la page rendue : ils sont recouverts ou hors cadre. Seul un test sur le rendu (y a-t-il de l'encre dans la boîte du texte ?) permet de les repérer.
 10. **Pièges de la lecture vectorielle, rencontrés et corrigés en v6** : (a) PowerPoint dessine toutes les barres d'une même couleur, ou tous les carrés de légende, dans **un seul chemin** : il faut le découper en sous-chemins (`MOVETO`) ; (b) les carrés de légende ont des **coins arrondis** (courbes) : les reconnaître par le taux de remplissage, pas comme rectangles ; (c) avec les boîtes **serrées** des caractères, « 11% » se coupe en « 1 » + « 1% » : utiliser les boîtes larges ; (d) regrouper les mots en lignes par **ligne de base**, pas par centre (accents, parenthèses) ; (e) une barre de 1 à 3 % fait 1,5 pt de large : rendu à 2 px par point et seuil de 0,8 pt ; (f) l'orientation (barres horizontales ou verticales) se décide **une fois par graphique**, sinon la valeur d'une barre trop fine est prise pour celle de la barre du dessous ; (g) barres divergentes : les colonnes se regroupent par chevauchement horizontal, pas par bord gauche ; (h) un texte gris foncé sur une barre foncée a peu de contraste : la visibilité se teste par la présence de pixels de la couleur du texte.
+11. **L'OCR de Docling n'est pas un coût à couper.** Mesuré sur 60 pages de texte pur (rapport de l'Assemblée nationale) : 16 s avec OCR, 11 s sans ; l'écart est surtout le chargement du modèle (≈ 0,08 s par page ensuite). Et sans OCR, Docling **perd du texte présent dans la couche PDF** (un intertitre et une puce, p. 30-31). L'OCR de Docling 2.149 est sélectif : régions de mise en page sans texte PDF, lettres vectorisées, et passage en pleine page quand la couche texte est cassée (scans). Un triage qui couperait l'OCR sur les pages « propres » a été écrit puis abandonné : il aurait coupé l'OCR précisément sur ces pages.
 
 ## 5. Problèmes ouverts
 
 - **Texte masqué (P5)** (p. 8, 10, 13) : écarté dans les graphiques (v6), mais les blocs de profil masqués situés hors des boîtes d'image sortent encore en lignes isolées dans le corps du texte. `VectorPage` sait déjà dire si un mot est visible : il reste à filtrer les textes de Docling avec.
-- **Pas de gain de temps** : Docling exécute Granite Vision sur tous les graphiques pendant la conversion, avant notre décision. Pour gagner les 2 à 3 minutes, couper `do_chart_extraction` et n'appeler Granite qu'en repli.
+- **Courbes** (Ipsos p. 57) : Docling découpe les trois courbes en morceaux (un tableau d'une ligne, des dates et titres isolés) et Granite n'en restitue qu'une série. C'est le prochain cas à lire en vectoriel : la couleur du texte des valeurs est celle du titre de la série.
+- **Rapport** : un tableau irrégulier relu par le VLM est signalé « corrigé automatiquement », comme un tableau corrigé sans modèle (Ipsos p. 59) ; distinguer les deux.
 - **Tokens** : + 19 % (4 209 → 4 998), surtout la colonne « Groupe » répétée à chaque ligne, plus les titres et totaux retrouvés. Variante possible : un petit tableau par groupe avec l'intertitre en gras.
-- **Courbes** (rapport Ipsos) et grands tableaux en texte libre : pas encore lus en vectoriel.
+- Grands tableaux en texte libre (Ipsos p. 7, 97) : pas encore lus en vectoriel.
 - Les **pages 16 à 21** n'ont jamais été converties ni vérifiées.
 - `fixed_table_md` ne couvre que le motif « taille / effectif / échantillon ».
 - Les seuils (34 % de cases vides, 50 % / 10 % de valeurs absentes, 0,55 de similarité pour le logo) ont été calibrés sur un seul document.
 - Rapport Ipsos (non encore converti) : pied de page répété sur 123 pages sur 128, que `denoise_markdown` ne retire pas ; mots coupés dans la couche texte (« E ST EN DÉCLIN », « 202 / 3 ») ; grands tableaux dessinés en texte libre (13 lignes × 27 colonnes).
 
-## 6. Vérifications de l'essai 8 (v6)
+## 6. Vérifications de l'essai 9 (v7)
+
+1. Ifop p. 1-15 : 22 s au lieu de 167 s, Markdown identique à la v6, `kind` = présentation, `granite_pages` vide. **OK.**
+2. Rapport de texte (p. 21-80) : Markdown identique à l'essai avec OCR, 12 s, Granite jamais chargé, `kind` = texte. **OK.**
+3. Ipsos p. 55-60 : `kind` = présentation ; repli Granite sur les seules p. 56-57 (deux courbes et un camembert non lus en vectoriel), tableaux bien rapprochés malgré une plage qui ne commence pas à la page 1. **OK** pour le mécanisme ; la qualité des courbes reste faible (§ 5).
+4. Tests : 20 sur 20.
+
+## 6 bis. Vérifications de l'essai 8 (v6)
 
 1. `report.json` : `vector` = 18 (toutes les images chiffrées), plus aucun « tableau Granite rejeté », plus d'appel à Qwen pour les graphiques ; seul avertissement : p. 4 « corrigé automatiquement » (le doublon de la v5.1 a disparu). **OK.**
 2. Anneau p. 9 : Très proche 2 %, Plutôt proche 11 %, Plutôt éloigné 34 %, Très éloigné 53 %, plus « Total Proche : 13% » et « Ensemble des Français : 6% ». Anneau p. 7 : 23 / 20 / 57 % plus « Total Oui : 43% ». **OK** (vérifié sur le rendu).
@@ -87,7 +99,7 @@ Fichier de développement : sondage Ifop de 21 pages au format slides, pages 1 �
 
 ## 7. Suite
 
-1. **Faire de Granite un repli** : couper l'extraction de graphiques de Docling et ne l'appeler que pour les images que la lecture vectorielle n'a pas comprises (gain attendu : environ 2 min 30 sur ces 15 pages).
+1. **Lecture vectorielle des courbes** (Ipsos p. 57), puis des grands tableaux en texte libre (Ipsos p. 7, 97).
 2. **Filtre du texte masqué** dans le corps du texte, avec `VectorPage` (§ 4.9).
 3. **Repères de page** dans le Markdown (`## [p. 8] titre de la slide`) pour que le LLM puisse citer ses sources.
 4. **Contrôle automatique des pertes** : pour chaque page, part des nombres de la couche texte visible retrouvés dans le Markdown, et nombres du Markdown absents de la page ; plus les contrôles propres aux sondages (sommes à 100 %, totaux égaux à la somme des parties). À inscrire dans `report.json`.
