@@ -151,6 +151,116 @@ def test_v5_1_avertissement_tableau_corrige():
 
 
 # --------------------------------------------------------------------------------------
+# Lecture vectorielle (vector_charts.py) sur des PDF factices générés ici
+# --------------------------------------------------------------------------------------
+def _pdf(ops: list[str], path: Path) -> Path:
+    """PDF d'une page 960 x 540 dont le contenu est la liste d'opérateurs `ops`
+    (Helvetica standard, encodage WinAnsi pour les accents)."""
+    content = "\n".join(ops).encode("cp1252")
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 960 540] "
+            b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+            b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream"]
+    out, offs = bytearray(b"%PDF-1.4\n"), []
+    for i, o in enumerate(objs, 1):
+        offs.append(len(out))
+        out += b"%d 0 obj\n" % i + o + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+    out += b"".join(b"%010d 00000 n \n" % o for o in offs)
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
+    path.write_bytes(bytes(out))
+    return path
+
+
+def _txt(x, y, s, size=10, rgb=(0.25, 0.25, 0.25)):
+    s = s.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+    return f"BT /F1 {size} Tf {rgb[0]} {rgb[1]} {rgb[2]} rg {x} {y} Td ({s}) Tj ET"
+
+
+def _rect(x, y, w, h, rgb):
+    return f"{rgb[0]} {rgb[1]} {rgb[2]} rg {x} {y} {w} {h} re f"
+
+
+def _poly(pts, rgb):
+    path = " ".join(f"{x} {y} {'m' if i == 0 else 'l'}" for i, (x, y) in enumerate(pts))
+    return f"{rgb[0]} {rgb[1]} {rgb[2]} rg {path} h f"
+
+
+TEAL, CORAL, GREY = (0.18, 0.4, 0.4), (0.98, 0.55, 0.52), (0.6, 0.6, 0.6)
+
+
+def _vec():
+    import tempfile
+    import vector_charts as vc
+    return vc, Path(tempfile.mkdtemp(prefix="pdf2llm_test_"))
+
+
+def test_vector_barres_avec_intertitres_et_texte_masque():
+    vc, tmp = _vec()
+    ops = [_txt(80, 420, "Sexe", rgb=(0.8, 0.1, 0.2)),
+           _txt(60, 400, "Hommes"), _rect(120, 399, 104, 9, TEAL), _txt(228, 400, "52%"),
+           _txt(60, 380, "Femmes"), _rect(120, 379, 68, 9, TEAL), _txt(192, 380, "34%"),
+           _txt(80, 360, "Âge", rgb=(0.8, 0.1, 0.2)),
+           _txt(50, 340, "18-24 ans"), _rect(120, 339, 72, 9, TEAL), _txt(196, 340, "36%"),
+           # texte recouvert par une forme blanche : invisible, doit être ignoré
+           _txt(300, 380, "99%"), _rect(295, 370, 40, 25, (1, 1, 1))]
+    doc = vc.VectorDocument(_pdf(ops, tmp / "barres.pdf"))
+    res = doc.read(1, 40, 320, 400, 440)
+    assert res is not None, doc.last_reason
+    assert "| Groupe | Libellé | Valeur |" in res.text
+    assert "| Sexe | Hommes | 52% |" in res.text and "| Sexe | Femmes | 34% |" in res.text
+    assert "| Âge | 18-24 ans | 36% |" in res.text
+    assert "99" not in res.text
+
+
+def test_vector_secteurs_rattaches_par_la_legende():
+    vc, tmp = _vec()
+    c3 = (0.37, 0.7, 0.71)
+    ops = [_poly([(600, 300), (720, 300), (600, 420)], TEAL), _txt(620, 330, "23%", rgb=(1, 1, 1)),
+           _poly([(600, 300), (600, 420), (480, 300)], c3), _txt(560, 330, "20%", rgb=(1, 1, 1)),
+           _poly([(480, 300), (720, 300), (600, 180)], CORAL), _txt(590, 260, "57%", rgb=(1, 1, 1)),
+           # légende dans un ordre différent de la lecture : c'est elle qui fait foi
+           _rect(780, 400, 10, 10, CORAL), _txt(795, 401, "Non"),
+           _rect(780, 385, 10, 10, TEAL), _txt(795, 386, "Oui, souvent"),
+           _rect(780, 370, 10, 10, c3), _txt(795, 371, "Oui, parfois"),
+           _txt(660, 410, "Total Oui : 43%")]
+    doc = vc.VectorDocument(_pdf(ops, tmp / "secteurs.pdf"))
+    res = doc.read(1, 470, 170, 760, 440)
+    assert res is not None, doc.last_reason
+    t = res.text
+    assert "| Non | 57% |\n| Oui, souvent | 23% |\n| Oui, parfois | 20% |" in t, t
+    assert "- Total Oui : 43%" in t
+
+
+def test_vector_barres_empilees_et_colonne_total():
+    vc, tmp = _vec()
+    ops = [_rect(40, 100, 10, 10, TEAL), _txt(55, 101, "Souvent"),
+           _rect(40, 85, 10, 10, CORAL), _txt(55, 86, "Jamais"),
+           _txt(320, 240, "Total Oui"),
+           _txt(60, 200, "Regarder"), _rect(120, 195, 30, 20, TEAL), _txt(125, 201, "7%"),
+           _rect(150, 195, 150, 20, CORAL), _txt(210, 201, "81%"), _txt(325, 201, "19%"),
+           _txt(60, 160, "Lire"), _rect(120, 155, 20, 20, TEAL), _txt(122, 161, "5%"),
+           _rect(140, 155, 160, 20, CORAL), _txt(210, 161, "88%"), _txt(325, 161, "12%")]
+    doc = vc.VectorDocument(_pdf(ops, tmp / "empilees.pdf"))
+    res = doc.read(1, 40, 140, 380, 260)
+    assert res is not None, doc.last_reason
+    assert "| Libellé | Souvent | Jamais | Total Oui |" in res.text, res.text
+    assert "| Regarder | 7% | 81% | 19% |" in res.text and "| Lire | 5% | 88% | 12% |" in res.text
+
+
+def test_vector_refuse_si_un_nombre_reste_inexplique():
+    vc, tmp = _vec()
+    ops = [_txt(60, 400, "Hommes"), _rect(120, 399, 104, 9, TEAL), _txt(228, 400, "52%"),
+           _txt(300, 300, "77%")]                    # nombre isolé : pas de barre
+    doc = vc.VectorDocument(_pdf(ops, tmp / "refus.pdf"))
+    assert doc.read(1, 40, 280, 400, 440) is None
+    assert "77%" in doc.last_reason
+
+
+# --------------------------------------------------------------------------------------
 # Tests sur un vrai export Docling (sautés si la fixture est absente)
 # --------------------------------------------------------------------------------------
 def _fixture_doc():
@@ -193,6 +303,28 @@ def test_fixture_anneau_sans_association_inventee():
     t17 = p.uncovered_titles(p.texts_near(doc, pic(17), 0),
                              "| 18-24 ans | 31% |\n| 25-34 ans | 25% |\n| 65 ans et plus | 3% |")
     assert any("Qui se dit proche" in x for x in t17) and not any("ans" in x for x in t17)
+
+
+def test_fixture_lecture_vectorielle_du_vrai_pdf():
+    """Le PDF de développement lui-même (variable PDF2LLM_TEST_PDF) + la fixture JSON."""
+    pdf = os.environ.get("PDF2LLM_TEST_PDF")
+    if not pdf or not FIXTURE.exists():
+        return "sauté"
+    import vector_charts as vc
+    dj = json.loads(FIXTURE.read_text("utf-8"))
+    doc = vc.VectorDocument(pdf)
+
+    def read(i):
+        pr = dj["pictures"][i]["prov"][0]
+        b = pr["bbox"]
+        return doc.read(pr["page_no"], b["l"], b["b"], b["r"], b["t"])
+    ring = read(14)                       # anneau p. 9 : rattachement exact par la couleur
+    assert ring and "| Très proche | 2% |\n| Plutôt proche | 11% |\n| Plutôt éloigné | 34% |" \
+        "\n| Très éloigné | 53% |" in ring.text, doc.last_reason
+    stacked = read(21)                    # barres empilées p. 12 + colonnes « Total Oui »
+    assert stacked and "| 7% | 4% | 8% | 81% | 19% | 8% |" in stacked.text, doc.last_reason
+    prof = read(10)                       # profil p. 8 : intertitres conservés
+    assert prof and "| Statut | CHOMEURS | 39% |" in prof.text, doc.last_reason
 
 
 if __name__ == "__main__":

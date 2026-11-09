@@ -10,14 +10,28 @@ Tout tourne en local : [Docling](https://github.com/docling-project/docling) (mi
 
 | Type d'image (classé par Docling) | Ce qu'elle devient |
 |---|---|
-| Graphique de données (barres, courbes, secteurs, nuages…) | Tableau de valeurs (Granite Vision, intégré à Docling), contrôlé puis repris par le modèle vision si suspect |
+| **Graphique vectoriel** (slides exportées de PowerPoint : barres, barres empilées, secteurs, anneaux) | Tableau **exact** lu dans la géométrie du PDF, sans modèle (`vector_charts.py`) : valeurs, libellés, légende, intertitres de groupe, colonnes « Total » |
+| Graphique de données non vectoriel, ou non compris en entier par la lecture vectorielle | Tableau de valeurs (Granite Vision, intégré à Docling), contrôlé puis repris par le modèle vision si suspect |
 | Camembert / anneau mal lu par Granite | Valeurs et légende tirées de la couche texte du PDF, **sans** rattachement inventé |
 | Schéma, organigramme, flux, architecture | Bloc Mermaid (modèle vision de LM Studio) |
 | Photo, capture d'écran, carte, plan | Description texte, plus un WebP compressé (1024 px max, lien local) |
 | Logo, icône, signature, tampon, QR code, image répétée, miniature | Supprimée (la légende est conservée) |
 | Image que le modèle vision juge décorative | Supprimée |
 
-Contrôles qualité appliqués aux sorties des modèles (détail dans [debug_note.md](debug_note.md)) :
+### Lecture vectorielle des graphiques
+
+Dans une présentation exportée en PDF, un graphique n'est pas une image : les barres et les secteurs sont des formes de couleur, et chaque valeur est du texte du PDF. `vector_charts.py` reconstruit le tableau par la géométrie :
+
+- **secteurs et segments empilés** : la valeur est dans une forme de couleur C ; le carré de légende de couleur C donne le libellé ;
+- **barres simples** : la valeur est à côté de la barre (à droite ou au-dessus), le libellé sur la même ligne ; les intertitres (« Sexe », « Âge »…) deviennent une colonne « Groupe » ;
+- **colonnes sans barre** (« Total Oui », « Ensemble des Français ») : rattachées à la ligne, avec leur en-tête ;
+- le **texte invisible** (recouvert par une forme, oublié dans la slide) est écarté grâce au rendu de la page.
+
+Règle de sûreté : le tableau n'est utilisé que si **tous** les nombres visibles de la zone et toutes les barres sont expliqués. Sinon l'image suit le chemin habituel ci-dessous, et la raison est notée dans `_debug/*.pictures.json`. La lecture prend quelques millisecondes par graphique.
+
+### Contrôles qualité
+
+Contrôles appliqués aux sorties des modèles (détail dans [debug_note.md](debug_note.md)) :
 
 - tableau Granite rejeté s'il a des libellés vides, des lignes sans nombre ou une colonne trop souvent vide ; tableau « fusionné » de deux graphiques voisins scindé en deux ;
 - sortie du modèle vision rejetée si plus de la moitié de ses nombres sont absents de la couche texte de la page (valeurs inventées) ;
@@ -80,6 +94,7 @@ Le script peut être interrompu et relancé : les PDF déjà convertis sont saut
 | `--pages 1-15` | Ne convertit que cette plage de pages |
 | `--force` | Reconvertit les PDF déjà faits |
 | `--dump-debug` | Écrit `sortie/_debug/` pour diagnostiquer sans reconvertir |
+| `--no-vector` | Désactive la lecture vectorielle des graphiques (tout passe par Granite Vision / le modèle vision) |
 | `--charts vlm` | Envoie les graphiques au modèle de LM Studio au lieu de Granite Vision (machine sans GPU) |
 | `--chart-api-url http://localhost:1234/v1` | Fait tourner Granite Vision dans LM Studio (modèle `granite-vision-4.1-4b`, réglable par `--chart-api-model`) |
 | `--mlx` | Force le preset MLX de Granite Vision (inutile en pratique : choisi automatiquement si `mlx-vlm` est installé) |
@@ -101,19 +116,27 @@ Pour changer la consigne donnée au modèle vision, modifiez `VLM_PROMPT` ou `VL
 python test_pdf2llm.py        # ou : python -m pytest test_pdf2llm.py
 ```
 
-Les tests unitaires utilisent des données factices et ne demandent aucun fichier. Deux tests rejouent la détection de texte sur un vrai export Docling : ils sont sautés si `tests/fixtures/exemple.p1-15.docling.json` est absent. Pour les activer, lancez une conversion avec `--dump-debug` et copiez le `*.docling.json` produit à cet endroit (ou indiquez son chemin dans `PDF2LLM_FIXTURE_JSON`). Les valeurs attendues correspondent au PDF de développement (sondage Ifop de 21 pages), non versionné.
+Les tests unitaires utilisent des données factices et ne demandent aucun fichier ; ceux de la lecture vectorielle génèrent eux-mêmes de petits PDF (barres avec intertitres et texte masqué, secteurs avec légende, barres empilées avec colonne « Total », refus si un nombre reste inexpliqué).
+
+Trois tests utilisent de vrais fichiers et sont sautés s'ils sont absents :
+
+- `tests/fixtures/exemple.p1-15.docling.json` (ou `PDF2LLM_FIXTURE_JSON`) : un export `--dump-debug` du PDF de développement ;
+- `PDF2LLM_TEST_PDF` : le PDF de développement lui-même (sondage Ifop de 21 pages), pour la lecture vectorielle.
+
+Ces fichiers ne sont pas versionnés. Les valeurs attendues correspondent à ce PDF.
 
 ## Organisation du code (`pdf2llm.py`)
 
 | Section | Rôle |
 |---|---|
+| `vector_charts.py` (module séparé) | Mots, lignes, formes et légende de chaque page (pypdfium2) ; visibilité par le rendu ; `read_region` reconstruit le graphique d'une zone ou lève `Unreadable` |
 | Triage par classe, consignes | Classes d'images de Docling (graphique, à supprimer, visuelle) ; consignes du modèle vision |
 | Utilitaires image, `VlmClient` | Réduction, empreinte des images répétées, WebP ; client API compatible OpenAI avec cache |
 | Contrôles qualité | `chart_rows_problem`, `split_sparse`, `invented_values`, `vlm_output_problem`, `keep_table_only`, `denoise_markdown` |
 | Couche texte du PDF | `text_items_near`, `pie_text_block`, `uncovered_titles`, `uncovered_texts` : texte que Docling place sous les images |
 | Tableaux décalés | `irregular_tables`, `fixed_table_md`, `decide_tables` |
 | Correctif Granite | `tolerant_csv_to_dataframe` remplace une fonction interne de Docling 2.149 (libellés avec virgule) |
-| Décision par image | `decide_pictures` : arbre de décision, appels parallèles au modèle vision |
+| Décision par image | `decide_pictures` : lecture vectorielle d'abord, puis arbre de décision habituel, appels parallèles au modèle vision |
 | Sérialisation | Sérialiseurs Markdown de Docling surchargés pour substituer images et tableaux |
 | Conversion, `main` | Options du convertisseur, découpage en tranches, rapports, reprise |
 
@@ -121,7 +144,7 @@ Les tests unitaires utilisent des données factices et ne demandent aucun fichie
 
 - Les seuils des contrôles ont été calibrés sur un seul document (sondage Ifop) ; à valider sur d'autres PDF.
 - `fixed_table_md` ne reconnaît que le motif Ifop « marges d'erreur ».
-- Un PDF exporté de PowerPoint peut contenir du **texte masqué** (recouvert ou hors cadre) que Docling extrait comme du texte normal.
-- Piste principale : dans les présentations exportées, les graphiques sont des **formes vectorielles** et leurs valeurs sont dans la couche texte. Les lire directement (couleur de la légende ↔ couleur du secteur ou de la barre ↔ valeur) donne un résultat exact, sans modèle vision, et bien plus vite. Voir [debug_note.md](debug_note.md).
+- La lecture vectorielle couvre les barres (simples, empilées, horizontales ou verticales) et les secteurs. Les **courbes** (séries distinguées par la couleur du texte des valeurs) et les grands **tableaux dessinés en texte libre** ne sont pas encore lus : ils passent par Granite Vision.
+- Le **texte masqué** n'est écarté que dans les graphiques ; hors graphique, Docling l'extrait encore comme du texte normal.
 
 Historique des versions, problèmes rencontrés et vérifications : [debug_note.md](debug_note.md).

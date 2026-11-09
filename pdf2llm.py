@@ -6,6 +6,9 @@ Pipeline (tout local, open source) :
   1. Docling convertit chaque PDF (mise en page, tableaux, OCR si besoin).
   2. Docling classe chaque image (bar_chart, flow_chart, logo, photograph...).
   3. Graphiques de données  -> tableau de valeurs (modèle Granite Vision de Docling).
+     Avant cela, si le graphique est VECTORIEL (formes + texte du PDF, cas des slides
+     exportées de PowerPoint), il est lu exactement par la géométrie (vector_charts.py),
+     sans modèle ; Granite et le modèle vision ne servent qu'en repli.
   4. Logos, icônes, signatures, QR codes, images répétées, miniatures -> supprimés.
   5. Schémas et autres images -> envoyés à un modèle vision (LM Studio, Ollama, ou toute API
      compatible OpenAI) qui renvoie du Mermaid, un tableau ou une description texte,
@@ -64,6 +67,11 @@ try:  # absent de certaines versions de docling-core : le repli tableau est alor
     from docling_core.transforms.serializer.markdown import MarkdownTableSerializer
 except ImportError:  # pragma: no cover
     MarkdownTableSerializer = None  # type: ignore[assignment,misc]
+
+try:  # lecture exacte des graphiques vectoriels (vector_charts.py, à côté de ce script)
+    from vector_charts import VectorDocument
+except ImportError:  # pragma: no cover
+    VectorDocument = None  # type: ignore[assignment,misc]
 
 log = logging.getLogger("pdf2llm")
 
@@ -689,7 +697,7 @@ def install_granite_csv_patch() -> None:
 # --------------------------------------------------------------------------------------
 @dataclass
 class PicDecision:
-    action: str = "drop"          # drop | chart_table | vlm | image
+    action: str = "drop"          # drop | vector | chart_table | text_layer | vlm | image
     label: str = ""
     confidence: float | None = None
     text: str = ""                # contenu Markdown qui remplace l'image
@@ -756,8 +764,18 @@ def rows_to_md(rows: list[list[str]], title: str | None = None) -> str:
     return f"**{title}**\n\n{md}" if title else md
 
 
+def bottom_left_bbox(doc: DoclingDocument, pic: PictureItem) -> tuple[float, float, float, float]:
+    """Boîte de l'image en points PDF, origine en bas à gauche : (gauche, bas, droite, haut)."""
+    pv = pic.prov[0]
+    bb = pv.bbox
+    if "TOP" in str(getattr(bb, "coord_origin", "")).upper():
+        bb = bb.to_bottom_left_origin(page_height=doc.pages[pv.page_no].size.height)
+    return min(bb.l, bb.r), min(bb.b, bb.t), max(bb.l, bb.r), max(bb.b, bb.t)
+
+
 def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClient | None,
-                    assets_dir: Path, stem: str, img_offset: int) -> dict[str, PicDecision]:
+                    assets_dir: Path, stem: str, img_offset: int,
+                    vec: "VectorDocument | None" = None) -> dict[str, PicDecision]:
     pics: list[PictureItem] = [it for it, _ in doc.iterate_items() if isinstance(it, PictureItem)]
     decisions: dict[str, PicDecision] = {}
     images: dict[str, Image.Image] = {}
@@ -800,6 +818,21 @@ def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClie
         if area_fraction(pic, doc) < args.min_area or min(img.size) < args.min_px:
             d.reason = "trop petite"
             continue
+        # 1) Graphique vectoriel : lecture exacte par la géométrie du PDF, quelle que soit
+        #    la classe (le classifieur prend parfois des barres pour un « flow_chart »).
+        #    Rendu seulement si TOUS les nombres visibles de la zone sont expliqués.
+        if vec is not None and d.page:
+            try:
+                res = vec.read(d.page, *bottom_left_bbox(doc, pic))
+            except Exception as e:  # noqa: BLE001
+                res = None
+                vec.last_reason = f"erreur : {e}"
+            if res is not None:
+                d.action, d.text = "vector", res.text
+                d.reason = f"graphique vectoriel lu dans le PDF ({res.kind})"
+                continue
+            if label in CHART_LABELS:
+                d.note = f"lecture vectorielle impossible : {vec.last_reason}"
         if label in CHART_LABELS:
             rows = chart_rows(pic)
             if rows:
@@ -1084,12 +1117,18 @@ def process_pdf(pdf: Path, out_dir: Path, converter: DocumentConverter,
     img_count = 0
     all_decisions: list[PicDecision] = []
     debug_dir = out_dir / "_debug"
+    vec = None
+    if VectorDocument is not None and not args.no_vector:
+        try:
+            vec = VectorDocument(pdf)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Lecture vectorielle désactivée pour ce PDF : %s", e)
     for start in range(first, last + 1, chunk):
         end = min(last, start + chunk - 1)
         log.info("  pages %d-%d / %d", start, end, total)
         res = converter.convert(pdf, page_range=(start, end))
         doc = res.document
-        decisions = decide_pictures(doc, args, vlm, assets_dir, stem, img_count)
+        decisions = decide_pictures(doc, args, vlm, assets_dir, stem, img_count, vec)
         img_count += sum(1 for d in decisions.values() if d.image_rel)
         all_decisions.extend(decisions.values())
         tables = decide_tables(doc, args, vlm, page_numbers(doc))
@@ -1100,6 +1139,8 @@ def process_pdf(pdf: Path, out_dir: Path, converter: DocumentConverter,
         if args.dump_debug:
             dump_debug(doc, decisions, debug_dir, stem, start, end)
         del res, doc
+    if vec is not None:
+        vec.close()
 
     md = "\n".join(md_parts)
     if not args.no_denoise:
@@ -1147,6 +1188,9 @@ def main() -> int:
                    help="Faire tourner Granite Vision via une API (ex. LM Studio) au lieu d'en local")
     c.add_argument("--chart-api-model", default="granite-vision-4.1-4b")
     c.add_argument("--mlx", action="store_true", help="Mac Apple Silicon : Granite Vision en MLX")
+    c.add_argument("--no-vector", action="store_true",
+                   help="Ne pas lire les graphiques vectoriels dans la géométrie du PDF "
+                        "(tout passe alors par Granite Vision / le modèle vision)")
     i = ap.add_argument_group("Images")
     i.add_argument("--keep-images", choices=["none", "visual", "all"], default="visual",
                    help="Garder un WebP en plus du texte : none / visual (photos, captures, cartes, plans) / all")
