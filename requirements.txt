@@ -3,3 +3,4 @@
 docling[vlm]==2.149.0
 requests
 pillow
+rich

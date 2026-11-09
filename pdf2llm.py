@@ -27,6 +27,7 @@ Exemples :
   python pdf2llm.py ./pdfs ./sortie --no-vlm          # sans modèle vision
   python pdf2llm.py ./pdfs ./sortie --pages 1-15 --vlm-model ...   # test rapide
   python pdf2llm.py un.pdf ./sortie --pages 1-15 --vlm-model ... --dump-debug  # + sortie/_debug/
+  python pdf2llm.py                                   # sans argument : assistant interactif
 """
 
 from __future__ import annotations
@@ -1313,7 +1314,19 @@ def process_pdf(pdf: Path, out_dir: Path, pool: ConverterPool,
     return rep
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    # Sans argument, dans un vrai terminal : assistant interactif (wizard.py)
+    if not argv and sys.stdin.isatty():
+        from wizard import run_wizard
+        try:
+            argv = run_wizard()
+        except (KeyboardInterrupt, EOFError):
+            argv = None
+        if not argv:
+            print("Abandon : rien n'a été converti.")
+            return 0
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("input", type=Path, help="Dossier de PDF (ou un seul PDF)")
@@ -1368,7 +1381,7 @@ def main() -> int:
     p.add_argument("--no-cell-matching", action="store_true",
                    help="TableFormer sans cell matching (à tester si les tableaux sont décalés)")
     p.add_argument("-v", "--verbose", action="store_true")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")

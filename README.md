@@ -56,7 +56,17 @@ pip install -r requirements.txt    # versions exactes testées : requirements.lo
 ```
 
 - **Python 3.12** est conseillé : c'est la version la plus sûre pour torch et MLX (3.14 a aussi fonctionné).
-- **Activez toujours le `.venv`** avant de lancer le script. Sans activation, `python` désigne le Python du système, où Docling n'est pas installé (`No module named 'docling'`). Un `.venv` déplacé ne fonctionne plus : recréez-le.
+- **Activez toujours le `.venv`** avant de lancer le script en ligne de commande. Sans activation, `python` désigne le Python du système, où Docling n'est pas installé (`No module named 'docling'`). Le lanceur `pdf2llm.command` n'a pas ce problème : il appelle directement `.venv/bin/python`.
+
+### Déplacer le dossier du projet
+
+Rien dans le code ne dépend de l'emplacement du dossier, et le dépôt git suit le dossier. Seul le `.venv` contient des chemins absolus : après un déplacement, `source .venv/bin/activate` et `pip` ne fonctionnent plus, mais `.venv/bin/python` et donc le lanceur `pdf2llm.command` continuent de fonctionner. Pour tout remettre en ordre, recréez l'environnement (le lanceur le propose aussi s'il le trouve cassé) :
+
+```bash
+rm -rf .venv && python3.12 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt
+```
+
+Les modèles téléchargés restent dans `~/.cache/huggingface` et ne sont pas retéléchargés. Évitez un dossier synchronisé par iCloud : un `.venv` compte des dizaines de milliers de fichiers.
 - L'extra `[vlm]` installe `mlx-vlm` sur Mac Apple Silicon. Sans lui, Granite Vision tournerait sur le processeur, ce qui est très lent ; le script refuse alors de démarrer.
 - Au premier lancement, Docling télécharge ses modèles depuis Hugging Face (mise en page, tableaux, classifieur d'images, Granite Vision, environ 8 Go), mis en cache dans `~/.cache/huggingface`.
 
@@ -69,6 +79,22 @@ pip install -r requirements.txt    # versions exactes testées : requirements.lo
 Avec Ollama, ajoutez `--vlm-url http://localhost:11434/v1`.
 
 ## Utilisation
+
+### Le plus simple : l'assistant
+
+Double-cliquez sur **`pdf2llm.command`** dans le Finder, ou lancez `python pdf2llm.py` sans argument. L'assistant :
+
+1. ouvre une fenêtre Finder pour choisir **un PDF ou un dossier de PDF** ;
+2. propose un dossier de sortie (Entrée pour accepter, `f` pour le choisir dans le Finder) ;
+3. affiche la **liste des modèles chargés dans LM Studio** et vous fait choisir par numéro (message clair si LM Studio n'est pas lancé, possibilité de continuer sans modèle vision) ;
+4. pose quelques questions avec des valeurs par défaut : pages (pour un essai), reconversion des PDF déjà faits, images à garder, fichiers de diagnostic ; les options avancées (lecture vectorielle, OCR, Granite ou modèle vision pour les graphiques, taille des tranches) ne sont proposées que sur demande ;
+5. affiche un résumé et la **commande équivalente**, à recopier pour relancer sans l'assistant.
+
+Les derniers choix sont mémorisés dans `~/.config/pdf2llm/derniers_choix.json` et proposés la fois suivante.
+
+Pour l'avoir sur le Bureau : clic droit sur `pdf2llm.command` → *Créer un alias*, puis déplacez l'alias. Au premier lancement, macOS peut demander de confirmer l'ouverture (clic droit → *Ouvrir*).
+
+### En ligne de commande
 
 ```bash
 # 1) Test rapide sur 15 pages : vérifiez le résultat avant de tout lancer
@@ -135,6 +161,7 @@ Ces fichiers ne sont pas versionnés. Les valeurs attendues correspondent à ce 
 
 | Section | Rôle |
 |---|---|
+| `wizard.py`, `pdf2llm.command` | Assistant interactif (Finder, liste des modèles LM Studio, questions, mémoire des choix ; `answers_to_argv` traduit les réponses en options) et lanceur à double-cliquer |
 | `vector_charts.py` (module séparé) | Mots, lignes, formes et légende de chaque page (pypdfium2) ; visibilité par le rendu ; `read_region` reconstruit le graphique d'une zone ou lève `Unreadable` |
 | Triage par classe, consignes | Classes d'images de Docling (graphique, à supprimer, visuelle) ; consignes du modèle vision |
 | Utilitaires image, `VlmClient` | Réduction, empreinte des images répétées, WebP ; client API compatible OpenAI avec cache |

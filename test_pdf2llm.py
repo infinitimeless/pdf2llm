@@ -300,6 +300,48 @@ def test_granite_rapprochement_des_boites():
 
 
 # --------------------------------------------------------------------------------------
+# Assistant interactif (wizard.py) : la logique, sans interaction
+# --------------------------------------------------------------------------------------
+def test_assistant_reponses_vers_arguments():
+    import wizard as w
+    base = {"input": "/d/a b.pdf", "output": "/d/sortie", "vlm_model": "qwen2.5-vl-7b-instruct",
+            "vlm_url": w.DEFAULT_VLM_URL, "keep_images": "visual"}
+    assert w.answers_to_argv(base) == ["/d/a b.pdf", "/d/sortie",
+                                       "--vlm-model", "qwen2.5-vl-7b-instruct"]
+    full = dict(base, pages="1-15", keep_images="none", force=True, dump_debug=True,
+                no_vector=True, no_ocr=True, charts="vlm", chunk_pages=40,
+                vlm_url="http://localhost:11434/v1")
+    argv = w.answers_to_argv(full)
+    assert argv[argv.index("--vlm-url") + 1] == "http://localhost:11434/v1"
+    for flag in ["--force", "--dump-debug", "--no-vector", "--no-ocr"]:
+        assert flag in argv
+    assert argv[argv.index("--pages") + 1] == "1-15" and ["--charts", "vlm"] == argv[
+        argv.index("--charts"):argv.index("--charts") + 2]
+    assert ["--chunk-pages", "40"] == argv[argv.index("--chunk-pages"):][:2]
+    # sans modèle vision : --no-vlm, et jamais --charts vlm
+    nov = w.answers_to_argv(dict(base, vlm_model=None, charts="vlm"))
+    assert "--no-vlm" in nov and "--charts" not in nov and "--vlm-model" not in nov
+    # la commande affichée se recolle telle quelle (espaces protégés)
+    assert w.command_line(w.answers_to_argv(base)).startswith("python pdf2llm.py '/d/a b.pdf'")
+
+
+def test_assistant_memoire_et_utilitaires():
+    import wizard as w
+    _, tmp = _vec()
+    prefs = tmp / "sous" / "choix.json"
+    assert w.load_prefs(prefs) == {}
+    w.save_prefs({"vlm_model": "x"}, prefs)
+    assert w.load_prefs(prefs) == {"vlm_model": "x"}
+    prefs.write_text("{cassé", "utf-8")
+    assert w.load_prefs(prefs) == {}                     # fichier abîmé : ignoré
+    assert w.vision_first(["llama-3-8b", "qwen2.5-vl-7b"])[0] == "qwen2.5-vl-7b"
+    assert w.valid_pages("1-15") and w.valid_pages("7") and not w.valid_pages("1-")
+    assert w.list_vlm_models("http://127.0.0.1:9/v1", timeout=0.5) is None
+    pdf = _pdf([_txt(60, 400, "x")], tmp / "un.pdf")
+    assert w.pdfs_in(tmp) == [pdf] and w.page_count(pdf) == 1
+
+
+# --------------------------------------------------------------------------------------
 # Tests sur un vrai export Docling (sautés si la fixture est absente)
 # --------------------------------------------------------------------------------------
 def _fixture_doc():

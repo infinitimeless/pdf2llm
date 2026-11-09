@@ -1,6 +1,6 @@
 # pdf2llm.py : note de débogage n° 5 (9 novembre 2026)
 
-Remplace la note n° 4. **État du code : v7** = v6 (lecture vectorielle des graphiques, `vector_charts.py`) + triage des PDF + Granite Vision en simple repli. `PROMPT_VERSION = "v5"` : les consignes du modèle vision n'ont pas changé, le cache reste valable. Les vérifications du § 6 ont été faites sur la v7.
+Remplace la note n° 4. **État du code : v7.1** = assistant interactif (`wizard.py`, `pdf2llm.command`) + v6 (lecture vectorielle des graphiques, `vector_charts.py`) + triage des PDF + Granite Vision en simple repli. `PROMPT_VERSION = "v5"` : les consignes du modèle vision n'ont pas changé, le cache reste valable. Les vérifications du § 6 ont été faites sur la v7.
 
 ---
 
@@ -25,6 +25,7 @@ Fichier de développement : sondage Ifop de 21 pages au format slides, pages 1 �
 | 7 | v5.1 | 167 s | 4 209 | Tableau p. 4 corrigé, « Oifop » retiré. |
 | 8 | v6 | 167 s | 4 998 | **18 graphiques sur 18 lus dans la géométrie du PDF**, aucun recours à Granite ni Qwen pour les remplacer. Anneaux rattachés, intertitres conservés. |
 | 9 | v7 | **22 s** | 4 998 | Même Markdown, octet pour octet. Granite n'est plus exécuté pendant la conversion : aucun repli nécessaire sur ces pages. Voir § 6. |
+| 10 | v7.1 | – | – | Assistant interactif (`wizard.py`) et lanceur `pdf2llm.command` ; conversion inchangée. |
 
 ## 3. Correctifs appliqués
 
