@@ -271,6 +271,41 @@ def test_vector_rappels_dans_un_tableau_a_part_et_legende():
     assert "Légende : Septembre 2026" in t, t
 
 
+def test_vector_slide_ipsos_legende_haute_segment_etroit_et_rappels():
+    """Traits de la slide Ipsos « préjugés (1/3) » : repères de légende hauts et étroits,
+    libellé à 22 pt du repère, segment de 12 pt dont la valeur blanche couvre le centre,
+    question sur deux lignes + « Base: A tous », bloc « % Vraie » avec années en en-tête."""
+    vc, tmp = _vec()
+    red, orange, green, white = (0.75, 0, 0), (1, 0.45, 0.06), (0.18, 0.7, 0.45), (1, 1, 1)
+    ops = [_txt(60, 470, "Voici des opinions. Pour chacune d'entre elles,"),
+           _txt(60, 458, "pensez-vous qu'elle est vraie ou fausse ?"),
+           _txt(60, 446, "Base: A tous", size=8),
+           _txt(712, 440, "% Vraie"), _txt(690, 420, "2024"), _txt(750, 420, "2020"),
+           _txt(60, 401, "Opinion A"),
+           _rect(300, 395, 12, 18, red), _txt(303, 401, "4", rgb=white),
+           _rect(312, 395, 138, 18, orange), _txt(370, 401, "40", rgb=white),
+           _rect(450, 395, 150, 18, green), _txt(515, 401, "56", rgb=white),
+           _txt(695, 401, "44"), _txt(755, 401, "39"),
+           _txt(60, 371, "Opinion B"),
+           _rect(300, 365, 60, 18, red), _txt(325, 371, "20", rgb=white),
+           _rect(360, 365, 140, 18, orange), _txt(420, 371, "30", rgb=white),
+           _rect(500, 365, 100, 18, green), _txt(545, 371, "50", rgb=white),
+           _txt(695, 371, "50"), _txt(757, 371, "-"),
+           _rect(100, 60, 5, 19, red), _txt(127, 64, "Vraie"),
+           _rect(250, 60, 5, 19, orange), _txt(277, 64, "Plutot vraie"),
+           _rect(400, 60, 5, 19, green), _txt(427, 64, "Fausse")]
+    doc = vc.VectorDocument(_pdf(ops, tmp / "ipsos.pdf"))
+    res = doc.read(1, 40, 50, 800, 480)
+    assert res is not None, doc.last_reason
+    t = res.text
+    assert t.startswith("Question : *Voici des opinions. Pour chacune d'entre elles, pensez-vous "
+                        "qu'elle est vraie ou fausse ?*\nBase : A tous\n\n"), t
+    assert ("| Libellé | Vraie | Plutot vraie | Fausse |\n|---|---|---|---|\n"
+            "| Opinion A | 4 | 40 | 56 |\n| Opinion B | 20 | 30 | 50 |") in t, t
+    assert ("*% Vraie*\n\n| Libellé | 2024 | 2020 |\n|---|---|---|\n"
+            "| Opinion A | 44 | 39 |\n| Opinion B | 50 | – |") in t, t
+
+
 def test_metadonnees_reconnues():
     from chart_format import ChartMeta, render, split_meta
     assert split_meta("Question : Connaissez-vous X ? Base : ensemble des Français") == {

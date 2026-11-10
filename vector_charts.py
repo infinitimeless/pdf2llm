@@ -35,9 +35,11 @@ import numpy as np
 import pypdfium2 as pdfium
 import pypdfium2.raw as raw
 
-from chart_format import ChartMeta, md_table, render
+from chart_format import ChartMeta, md_table, render, split_meta
 
 NUM_WORD = re.compile(r"^[-+−]?\d+(?:[.,]\d+)?%?$")
+YEAR = re.compile(r"^(?:19|20)\d{2}$")
+BULLET = re.compile(r"^\s*[\uf000-\uf8ff•▪▸►‣]\s*")      # puce (souvent un glyphe privé)
 WHITE = 235            # composante au-dessus de laquelle une couleur est « blanche »
 MARGIN_BOTTOM = 25     # bande du bas de page ignorée (numéro de slide, pied de page)
 MARGIN_TOP = 12
@@ -167,12 +169,14 @@ class VectorPage:
         return int(close.sum()) >= 2
 
     def _shows_color(self, s: Shape) -> bool:
-        inner = Box(s.l + s.w * 0.25, s.b + s.h * 0.25, s.r - s.w * 0.25, s.t - s.h * 0.25)
-        c = self._crop(inner)
+        # Part des pixels de la forme qui ont sa couleur (et non la médiane du centre : la
+        # valeur écrite en blanc dans un segment étroit en couvre le milieu, ex. « 4 »).
+        m = min(0.5, s.w / 4, s.h / 4)
+        c = self._crop(Box(s.l + m, s.b + m, s.r - m, s.t - m))
         if c.size == 0:
             return False
-        med = np.median(c.reshape(-1, 3), axis=0)
-        return bool(np.abs(med - np.array(s.color)).max() <= 40)
+        px = c.reshape(-1, 3)
+        return bool((np.abs(px - np.array(s.color)).max(axis=1) <= 40).mean() >= 0.3)
 
     # -- texte ---------------------------------------------------------------------------
     def _words(self, page: pdfium.PdfPage) -> list[Word]:
@@ -301,17 +305,30 @@ class VectorPage:
         for s in self.shapes:
             # carré ou carré arrondi (les angles arrondis sont des courbes)
             if not (s.visible and s.fill_ratio > 0.75 and 4 <= s.w <= 22 and 4 <= s.h <= 22
-                    and max(s.w, s.h) <= 2 * min(s.w, s.h)):
+                    and max(s.w, s.h) <= 4 * min(s.w, s.h)):
                 continue
             cands = [ln for ln in self.lines if ln.visible and not ln.is_num
-                     and 0 <= ln.l - s.r <= 15 and s.b - 3 <= ln.cy <= s.t + 3]
+                     and 0 <= ln.l - s.r <= 25 and s.b - 3 <= ln.cy <= s.t + 3]
             if cands:
                 ln = min(cands, key=lambda ln: ln.l - s.r)
                 found.setdefault(s.color, []).append((ln, s))
         legend, swatches = {}, set()
+        self.legend_lines: set[int] = set()
+        primary = {id(ln) for items in found.values() for ln, _ in items}
         for color, items in found.items():
             if len({ln.text for ln, _ in items}) == 1:      # une couleur = un seul libellé
-                legend[color] = items[0][0].text
+                ln = items[0][0]
+                # libellé sur deux lignes (« Ni une bonne chose, ni une » / « mauvaise
+                # chose ») : ligne juste dessous, sous la première, sans chiffre
+                parts, last = [ln], ln
+                for o in sorted(self.lines, key=lambda x: -x.cy):
+                    if (id(o) not in primary and o.visible and not re.search(r"\d", o.text)
+                            and 0 < last.cy - o.cy <= 1.9 * o.size
+                            and o.l >= ln.l - 5 and o.r <= ln.r + 5):
+                        parts.append(o)
+                        last = o
+                legend[color] = " ".join(x.text for x in parts)
+                self.legend_lines.update(id(x) for x in parts)
                 swatches.update(id(s) for _, s in items)
         return legend, swatches
 
@@ -400,7 +417,11 @@ def read_region(pg: VectorPage, l: float, b: float, r: float, t: float,
         raise Unreadable("aucun nombre visible dans la zone")
     labels = [ln for ln in lines if not ln.is_num]
     legend_texts = set(pg.legend.values())
-    labels = [ln for ln in labels if ln.text not in legend_texts]
+    labels = [ln for ln in labels if ln.text not in legend_texts
+              and id(ln) not in getattr(pg, "legend_lines", ())]
+    # « Base : ... », « Source : ... » ne sont jamais des libellés de ligne
+    meta_lines = [ln for ln in labels if split_meta(ln.text)]
+    labels = [ln for ln in labels if not split_meta(ln.text)]
     zone_area = zone.w * zone.h
     shapes = [s for s in pg.shapes if s.visible and inside(s.cx, s.cy) and id(s) not in pg.swatches]
     # Barres : rectangles pleins ; une barre de 1 % peut ne faire qu'un point de large
@@ -502,7 +523,9 @@ def read_region(pg: VectorPage, l: float, b: float, r: float, t: float,
             # Un intertitre est un texte court non utilisé, placé dans la colonne (au-dessus
             # des libellés) à moins de 1,6 pas de ligne au-dessus de la première ligne qui le
             # suit ; il vaut pour cette ligne et les suivantes de la colonne.
-            heads = [ln for ln in labels if id(ln) not in used and len(ln.text) <= 45]
+            # (pas une suite de phrase : « pensez-vous qu'elle est vraie ou fausse ? »)
+            heads = [ln for ln in labels if id(ln) not in used and len(ln.text) <= 45
+                     and not ln.text[:1].islower() and not ln.text.rstrip().endswith(("?", "…"))]
             for h in heads:
                 below = [rw for rw in rows
                          if min(x.l for x in rw["label"]) - 30 <= h.cx <= rw["r"] + 10
@@ -522,6 +545,16 @@ def read_region(pg: VectorPage, l: float, b: float, r: float, t: float,
                 for rw in sorted(col_rows, key=lambda x: -x["cy"]):
                     g = rw["group"] or g
                     rw["group"] = g
+
+    # 4 bis) années isolées au-dessus des lignes (« 2024 2020 2017 » d'un bloc de rappels) :
+    #    ce sont des en-têtes de colonnes, pas des valeurs
+    if rows and not vertical:
+        top = max(rw["cy"] for rw in rows)
+        years = [v for v in values if id(v) not in owner and YEAR.match(v.text) and v.cy > top]
+        if years:
+            labels += [Line(w.l, w.b, w.r, w.t, words=[w], size=w.size) for w in years]
+            gone = {id(w) for w in years}
+            values = [v for v in values if id(v) not in gone]
 
     # 5) colonnes de valeurs sans barre, sur la ligne d'une barre (« Total Oui »...)
     extra_cols: list[dict] = []
@@ -547,6 +580,8 @@ def read_region(pg: VectorPage, l: float, b: float, r: float, t: float,
                 continue
             first = min(above, key=lambda ln: ln.cy)
             stack = [first]
+            if YEAR.match(first.text):        # en-tête « 2024 » : rien d'autre au-dessus
+                above = []
             for ln in sorted(above, key=lambda ln: ln.cy):
                 if ln is not first and 0 < ln.cy - stack[-1].cy <= 1.8 * ln.size:
                     stack.append(ln)
@@ -557,8 +592,25 @@ def read_region(pg: VectorPage, l: float, b: float, r: float, t: float,
     #    pourcentage ou « : nombre », précédées éventuellement d'un début de libellé
     #    juste au-dessus. (Une question qui cite une année reste un titre.)
     notes: list[str] = []
-    for ln in sorted(labels, key=lambda x: -x.cy):
-        if id(ln) in used or not re.search(r"\d\s*%|:\s*\d", ln.text):
+    # encadrés à puces (« ▸ 64% des moins de 35 ans contre » / « 53% de ceux qui... ») :
+    # une puce = une annotation, avec ses lignes de suite (en retrait, juste dessous)
+    by_y = sorted(labels, key=lambda x: -x.cy)
+    for ln in by_y:
+        if id(ln) in used or not BULLET.match(ln.text) or not re.search(r"\w", ln.text):
+            continue
+        parts, last = [BULLET.sub("", ln.text)], ln
+        used.add(id(ln))
+        for o in by_y:
+            if (id(o) not in used and not BULLET.match(o.text) and ln.l < o.l <= ln.l + 30
+                    and 0 < last.cy - o.cy <= 1.9 * o.size):
+                parts.append(o.text)
+                used.add(id(o))
+                last = o
+        notes.append(" ".join(parts))
+    for ln in by_y:
+        # (une longue phrase qui cite « 21% » est une question, pas une annotation)
+        if (id(ln) in used or len(ln.text) > 80
+                or not re.search(r"\d\s*%|:\s*\d", ln.text)):
             continue
         prev = [o for o in labels if id(o) not in used and o is not ln
                 and not re.search(r"\d", o.text) and 0 < o.cy - ln.cy <= 1.8 * ln.size
@@ -584,6 +636,7 @@ def read_region(pg: VectorPage, l: float, b: float, r: float, t: float,
         hist = [i for i, h in enumerate(heads) if c_is_history(h)]
         main = [i for i in range(len(extra_cols)) if i not in hist]
         _columns(rows)
+        top_row = max(rw["cy"] for rw in rows)
 
         def col_key(rw):
             # vertical : de gauche à droite ; horizontal : colonne par colonne, de haut en bas
@@ -615,7 +668,36 @@ def read_region(pg: VectorPage, l: float, b: float, r: float, t: float,
             blocks.append(_md_table([group or "Libellé"] + tail, seg_rows))
         if hist_rows:
             gh = ["Groupe"] if any(r["group"] for r in rows) else []
-            blocks.append(_md_table(gh + ["Libellé"] + [heads[i] for i in hist], hist_rows))
+            # intitulés posés au-dessus des colonnes de rappel (« Rappels », « % Vraie »)
+            hl = min(extra_cols[i]["l"] for i in hist) - 12
+            hr = max(extra_cols[i]["r"] for i in hist) + 12
+            cap = [ln for ln in sorted(labels, key=lambda x: -x.cy) if id(ln) not in used
+                   and ln.cy > top_row and hl <= ln.cx <= hr]
+            hh = [heads[i] for i in hist]
+            # Années répétées (« 2020 2017 | 2020 2017 ») : plusieurs mesures côte à côte ;
+            # l'intitulé posé au-dessus de chaque groupe (« % Correspond à la réalité »)
+            # préfixe ses années. Un texte à cheval sur deux groupes reste en légende.
+            if len(set(hh)) < len(hh):
+                groups: list[list[int]] = [[]]
+                for k, i in enumerate(hist):
+                    if heads[i] in [heads[j] for j in groups[-1]]:
+                        groups.append([])
+                    groups[-1].append(i)
+                k = 0
+                for g in groups:
+                    gl = min(extra_cols[i]["l"] for i in g) - 8
+                    gr = max(extra_cols[i]["r"] for i in g) + 8
+                    sub = [ln for ln in cap if gl <= ln.l and ln.r <= gr]
+                    name = " ".join(ln.text for ln in sub)
+                    for i in g:
+                        hh[k] = f"{name} {heads[i]}".strip()
+                        k += 1
+                    cap = [ln for ln in cap if ln not in sub]
+                    used.update(id(ln) for ln in sub)
+            used.update(id(ln) for ln in cap)
+            table = _md_table(gh + ["Libellé"] + hh, hist_rows)
+            blocks.append(("*" + " — ".join(ln.text for ln in cap) + "*\n\n" if cap else "")
+                          + table)
         kinds.append("barres empilées" if stacked else
                      "barres verticales" if vertical else "barres")
 
@@ -629,7 +711,18 @@ def read_region(pg: VectorPage, l: float, b: float, r: float, t: float,
             if lab and lab not in legend and f"| {lab} |" not in shown:
                 legend.append(lab)
 
-    titles = [ln.text for ln in sorted(labels, key=lambda x: (-x.cy, x.l)) if id(ln) not in used]
+    titles: list[str] = []
+    prev = None
+    for ln in sorted([*labels, *meta_lines], key=lambda x: (-x.cy, x.l)):
+        if id(ln) in used or not re.search(r"\w", ln.text):
+            continue
+        # suite d'une phrase coupée en deux lignes (commence par une minuscule)
+        if (prev is not None and titles and ln.text[:1].islower()
+                and 0 < prev.cy - ln.cy <= 2 * ln.size and not split_meta(titles[-1])):
+            titles[-1] += " " + ln.text
+        else:
+            titles.append(ln.text)
+        prev = ln
     meta = ChartMeta(legend=legend, notes=notes)
     meta.add_texts(titles)
     body = "\n\n".join(blocks)

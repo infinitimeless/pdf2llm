@@ -26,7 +26,9 @@ Dans une présentation exportée en PDF, un graphique n'est pas une image : les 
 - **barres simples** : la valeur est à côté de la barre (à droite ou au-dessus), le libellé sur la même ligne ; chaque intertitre (« Sexe », « Âge »…) donne **son propre tableau**, dont il devient l'en-tête de première colonne ;
 - **colonnes sans barre** (« Total Oui », « Ensemble des Français ») : rattachées à la ligne, avec leur en-tête ; une colonne de **rappel** (« Rappel 2022 », année, « vague », « évolution ») part dans un tableau à part ;
 - libellés de **légende** qui ne figurent dans aucun tableau : repris dans la ligne « Légende » ;
-- le **texte invisible** (recouvert par une forme, oublié dans la slide) est écarté grâce au rendu de la page.
+- le **texte invisible** (recouvert par une forme, oublié dans la slide) est écarté grâce au rendu de la page ;
+- un graphique que Docling prend pour un **tableau** (barres empilées d'Ipsos lues comme une grille, colonnes décalées) est relu de la même façon ; le tableau de Docling n'est remplacé que si la lecture réussit (`vector_tables`) ;
+- des années seules au-dessus de colonnes sans barre (« 2024 2020 2017 » d'un bloc « Rappels ») sont des en-têtes : ces colonnes forment le tableau des rappels.
 
 Règle de sûreté : le tableau n'est utilisé que si **tous** les nombres visibles de la zone et toutes les barres sont expliqués. Sinon l'image suit le chemin habituel ci-dessous, et la raison est notée dans `_debug/*.pictures.json`. La lecture prend quelques millisecondes par graphique.
 

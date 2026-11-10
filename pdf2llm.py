@@ -531,14 +531,41 @@ def fixed_table_md(grid: list[list[str]]) -> str | None:
     return f"**{title}**\n\n{md}" if title else md
 
 
+def vector_tables(doc: DoclingDocument, vec: "VectorDocument | None") -> dict[str, str]:
+    """« Tableaux » de Docling qui sont en fait des graphiques vectoriels (barres empilées
+    d'Ipsos lues comme une grille, colonnes décalées) : relus par la géométrie du PDF.
+    Retenu seulement si TOUS les nombres de la zone sont rattachés à une barre ou à une
+    colonne (sinon `read` renvoie None et le tableau de Docling est gardé)."""
+    out: dict[str, str] = {}
+    if vec is None:
+        return out
+    from docling_core.types.doc import TableItem
+    for it, _ in doc.iterate_items():
+        if not isinstance(it, TableItem) or not it.prov:
+            continue
+        try:
+            res = vec.read(it.prov[0].page_no, *_bl_box(doc, it.prov[0]))
+        except Exception as e:  # noqa: BLE001
+            res = None
+            log.debug("lecture vectorielle du tableau impossible : %s", e)
+        if res is not None and res.kind:
+            out[it.self_ref] = res.text
+            log.info("    p.%s : tableau Docling remplacé par le graphique vectoriel (%s)",
+                     it.prov[0].page_no, res.kind)
+    return out
+
+
 def decide_tables(doc: DoclingDocument, args: argparse.Namespace, vlm: "VlmClient | None",
-                  pnums: dict[int, set[str]]) -> dict[str, tuple[int, str]]:
+                  pnums: dict[int, set[str]],
+                  skip: set[str] | None = None) -> dict[str, tuple[int, str]]:
     """Tableaux à grille irrégulière : 1) correctif déterministe si le motif est reconnu ;
     2) sinon relecture de l'image par le VLM, retenue seulement si elle a au moins autant de
     lignes (à 2 près) et si ses nombres figurent dans la couche texte de la page ;
-    3) sinon on garde la version de Docling."""
+    3) sinon on garde la version de Docling. `skip` : déjà lus en vectoriel."""
     out: dict[str, tuple[int, str]] = {}
     for it in irregular_tables(doc):
+        if it.self_ref in (skip or set()):
+            continue
         try:
             page = it.prov[0].page_no
             grid = [[(c.text or "").strip() for c in row] for row in it.data.grid]
@@ -732,6 +759,7 @@ class DocReport:
     noise_lines_removed: int = 0
     kind: str = ""                # triage : texte | présentation | scan
     granite_pages: list[int] = field(default_factory=list)   # pages reconverties par Granite
+    vector_tables: int = 0        # « tableaux » Docling relus comme graphiques vectoriels
     warnings: list[str] = field(default_factory=list)
 
 
@@ -1134,7 +1162,8 @@ class SkipTextSerializer(MarkdownTextSerializer):
 
 
 def doc_to_markdown(doc: DoclingDocument, decisions: dict[str, PicDecision],
-                    tables: dict[str, tuple[int, str]] | None = None) -> str:
+                    tables: dict[str, tuple[int, str]] | None = None,
+                    charts: dict[str, str] | None = None) -> str:
     pic_ser = SubstitutePictureSerializer()
     pic_ser.decisions = decisions
     txt_ser = SkipTextSerializer()
@@ -1148,9 +1177,10 @@ def doc_to_markdown(doc: DoclingDocument, decisions: dict[str, PicDecision],
         escape_underscores=False,
     )
     extra: dict[str, Any] = {}
-    if tables and MarkdownTableSerializer is not None:
+    if (tables or charts) and MarkdownTableSerializer is not None:
         tab_ser = SubstituteTableSerializer()
-        tab_ser.replacements = {ref: md for ref, (_pg, md) in tables.items()}
+        tab_ser.replacements = {ref: md for ref, (_pg, md) in (tables or {}).items()}
+        tab_ser.replacements.update(charts or {})
         extra["table_serializer"] = tab_ser
     ser = MarkdownDocSerializer(doc=doc, picture_serializer=pic_ser, text_serializer=txt_ser,
                                 params=params, **extra)
@@ -1388,9 +1418,11 @@ def process_pdf(pdf: Path, out_dir: Path, pool: ConverterPool,
         decisions = decide_pictures(doc, args, vlm, assets_dir, stem, img_count, vec, granite)
         img_count += sum(1 for d in decisions.values() if d.image_rel)
         all_decisions.extend(decisions.values())
-        tables = decide_tables(doc, args, vlm, page_numbers(doc))
-        md_parts.append(doc_to_markdown(doc, decisions, tables))
-        rep.warnings.extend(table_warnings(doc, set(tables)))
+        vtabs = vector_tables(doc, vec)
+        tables = decide_tables(doc, args, vlm, page_numbers(doc), set(vtabs))
+        md_parts.append(doc_to_markdown(doc, decisions, tables, vtabs))
+        rep.vector_tables += len(vtabs)
+        rep.warnings.extend(table_warnings(doc, set(tables) | set(vtabs)))
         rep.warnings.extend(f"p. {pg} : tableau irrégulier corrigé automatiquement"
                             for pg, _md in tables.values())
         if args.dump_debug:

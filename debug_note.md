@@ -27,6 +27,7 @@ Fichier de développement : sondage Ifop de 21 pages au format slides, pages 1 �
 | 9 | v7 | **22 s** | 4 998 | Même Markdown, octet pour octet. Granite n'est plus exécuté pendant la conversion : aucun repli nécessaire sur ces pages. Voir § 6. |
 | 10 | v7.1 | – | – | Assistant interactif (`wizard.py`) et lanceur `pdf2llm.command` ; conversion inchangée. |
 | 11 | v8 | 227 s (Ipsos p. 10-25) | 4 710 | Format commun (`chart_format.py`) : métadonnées puis tableaux homogènes. Question / base reprises de la couche texte et retirées du flux (Ipsos : 8 blocs). Lecture vectorielle : un tableau par intertitre, rappels à part, légende non reprise conservée. Constat : sur Ipsos, aucun graphique lu en vectoriel (courbes non gérées) et tableaux Granite pauvres (`X / Y`, `Group 1`). |
+| 12 | v8.1 | 493 s (Ipsos antisémitisme, 68 p.) | 15 273 | Graphiques que Docling prend pour des tableaux relus en vectoriel (`vector_tables`, p. 8 et 22). Repères de légende hauts et étroits, libellé à 22 pt, légendes sur deux lignes, segment étroit dont la valeur blanche masque le centre (visibilité = part de pixels), années au-dessus d'un bloc « Rappels » = en-têtes, mesures côte à côte dans les rappels (« % Correspond à la réalité 2020 »), encadrés à puces. Vectoriel 3 → 9 graphiques + 2 tableaux, Granite 37 → 32 pages. p. 22, 16, 8, 46 vérifiées contre le rendu. Fractures p. 10-25 : sortie identique. Limite : un nombre dessiné en formes (p. 40, « 26 ») n'est pas dans la couche texte → « – ». |
 
 ## 3. Correctifs appliqués
 

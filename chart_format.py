@@ -108,6 +108,12 @@ class ChartMeta:
                 self.add_fields(f)
             else:
                 self.title.append(t)
+        # question non étiquetée lue dans le graphique : seulement à côté d'une base
+        if self.base and not self.question:
+            q = next((t for t in self.title if looks_like_question(t)), None)
+            if q:
+                self.title.remove(q)
+                self.question = q
 
     def lines(self) -> list[str]:
         out = []
