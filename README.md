@@ -23,11 +23,32 @@ Tout tourne en local : [Docling](https://github.com/docling-project/docling) (mi
 Dans une présentation exportée en PDF, un graphique n'est pas une image : les barres et les secteurs sont des formes de couleur, et chaque valeur est du texte du PDF. `vector_charts.py` reconstruit le tableau par la géométrie :
 
 - **secteurs et segments empilés** : la valeur est dans une forme de couleur C ; le carré de légende de couleur C donne le libellé ;
-- **barres simples** : la valeur est à côté de la barre (à droite ou au-dessus), le libellé sur la même ligne ; les intertitres (« Sexe », « Âge »…) deviennent une colonne « Groupe » ;
-- **colonnes sans barre** (« Total Oui », « Ensemble des Français ») : rattachées à la ligne, avec leur en-tête ;
+- **barres simples** : la valeur est à côté de la barre (à droite ou au-dessus), le libellé sur la même ligne ; chaque intertitre (« Sexe », « Âge »…) donne **son propre tableau**, dont il devient l'en-tête de première colonne ;
+- **colonnes sans barre** (« Total Oui », « Ensemble des Français ») : rattachées à la ligne, avec leur en-tête ; une colonne de **rappel** (« Rappel 2022 », année, « vague », « évolution ») part dans un tableau à part ;
+- libellés de **légende** qui ne figurent dans aucun tableau : repris dans la ligne « Légende » ;
 - le **texte invisible** (recouvert par une forme, oublié dans la slide) est écarté grâce au rendu de la page.
 
 Règle de sûreté : le tableau n'est utilisé que si **tous** les nombres visibles de la zone et toutes les barres sont expliqués. Sinon l'image suit le chemin habituel ci-dessous, et la raison est notée dans `_debug/*.pictures.json`. La lecture prend quelques millisecondes par graphique.
+
+### Format commun des graphiques (`chart_format.py`)
+
+Quel que soit le chemin (lecture vectorielle, Granite, couche texte, modèle vision), un graphique chiffré devient un bloc de métadonnées puis un ou plusieurs tableaux, **un jeu de données homogène par tableau** :
+
+```
+Titre : Qui connaît Alain Soral ? ; Selon le sexe et l'âge
+Question : *Vous personnellement, connaissez-vous, ne serait-ce que de nom, Alain Soral ?*
+Base : ensemble des Français
+Légende : …
+Source : …
+Annotations : Total Oui : 43%
+
+| Sexe | Valeur |
+|---|---|
+| Hommes | 52% |
+| Femmes | 34% |
+```
+
+Seuls les champs trouvés sont écrits. Les métadonnées viennent **de la couche texte du PDF, jamais d'un modèle** : « Question : », « Base : », « (base: …) », « Source : », ou une question non étiquetée suivie d'une base. Question et base vont au premier graphique situé dessous, la source au dernier graphique situé dessus, un texte placé dans la boîte d'une image à cette image ; le texte repris est retiré du flux pour ne pas apparaître deux fois. Une valeur absente s'écrit « – ».
 
 ### Triage et repli Granite Vision
 
@@ -162,6 +183,7 @@ Ces fichiers ne sont pas versionnés. Les valeurs attendues correspondent à ce 
 | Section | Rôle |
 |---|---|
 | `wizard.py`, `pdf2llm.command` | Assistant interactif (Finder, liste des modèles LM Studio, questions, mémoire des choix ; `answers_to_argv` traduit les réponses en options) et lanceur à double-cliquer |
+| `chart_format.py` (module séparé) | Format commun des graphiques : `ChartMeta`, `split_meta` (question, base, source), `render` ; dans `pdf2llm.py`, `build_chart_blocks` rattache les métadonnées de la page au bon graphique |
 | `vector_charts.py` (module séparé) | Mots, lignes, formes et légende de chaque page (pypdfium2) ; visibilité par le rendu ; `read_region` reconstruit le graphique d'une zone ou lève `Unreadable` |
 | Triage par classe, consignes | Classes d'images de Docling (graphique, à supprimer, visuelle) ; consignes du modèle vision |
 | Utilitaires image, `VlmClient` | Réduction, empreinte des images répétées, WebP ; client API compatible OpenAI avec cache |

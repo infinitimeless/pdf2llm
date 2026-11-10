@@ -35,6 +35,8 @@ import numpy as np
 import pypdfium2 as pdfium
 import pypdfium2.raw as raw
 
+from chart_format import ChartMeta, md_table, render
+
 NUM_WORD = re.compile(r"^[-+−]?\d+(?:[.,]\d+)?%?$")
 WHITE = 235            # composante au-dessus de laquelle une couleur est « blanche »
 MARGIN_BOTTOM = 25     # bande du bas de page ignorée (numéro de slide, pied de page)
@@ -338,9 +340,16 @@ class Unreadable(Exception):
 
 @dataclass
 class ChartResult:
-    text: str
+    text: str          # rendu complet : métadonnées + tableaux (chart_format.render)
     kind: str          # "secteurs", "barres", "barres empilées", ...
     values: int        # nombre de valeurs lues
+    meta: ChartMeta = field(default_factory=ChartMeta)
+    body: str = ""     # tableaux seuls
+
+# En-tête d'une colonne sans barre qui est un rappel d'une vague antérieure : ces valeurs
+# vont dans un tableau à part (« un jeu de données homogène par tableau »).
+HISTORY_HEAD = re.compile(r"rappel|\b(?:19|20)\d{2}\b|vague|évol|evol|écart|ecart|\bvs\b"
+                          r"|précédent|precedent", re.I)
 
 
 def _row_of(bars: list[Shape]) -> list[list[Shape]]:
@@ -374,10 +383,7 @@ def _columns(rows: list[dict]) -> None:
             rw["col"] = len(spans) - 1
 
 
-def _md_table(head: list[str], rows: list[list[str]]) -> str:
-    esc = [[c.replace("|", "\\|") for c in r] for r in [head] + rows]
-    return "\n".join(["| " + " | ".join(esc[0]) + " |", "|" + "---|" * len(head)]
-                     + ["| " + " | ".join(r) + " |" for r in esc[1:]])
+_md_table = md_table
 
 
 def read_region(pg: VectorPage, l: float, b: float, r: float, t: float,
@@ -573,40 +579,66 @@ def read_region(pg: VectorPage, l: float, b: float, r: float, t: float,
     if rows:
         stacked = sorted({series[id(v)] for v in rect_vals if id(v) in series},
                          key=lambda s: pg.legend_order().index(s) if s in pg.legend_order() else 99)
-        has_group = any(rw["group"] for rw in rows)
-        head = (["Groupe"] if has_group else []) + ["Libellé"]
-        head += stacked if stacked else ["Valeur"]
-        head += [c["head"] or f"Colonne {i + 1}" for i, c in enumerate(extra_cols)]
+        heads = [c["head"] or f"Colonne {i + 1}" for i, c in enumerate(extra_cols)]
+        # Colonnes de rappel (vague antérieure) : tableau à part
+        hist = [i for i, h in enumerate(heads) if c_is_history(h)]
+        main = [i for i in range(len(extra_cols)) if i not in hist]
         _columns(rows)
 
         def col_key(rw):
             # vertical : de gauche à droite ; horizontal : colonne par colonne, de haut en bas
             return (0, rw["l"]) if vertical else (rw["col"], -rw["cy"])
-        out_rows = []
+        # Un tableau par intertitre de groupe (« Sexe », « Âge »...) : l'intertitre devient
+        # l'en-tête de la première colonne. Lignes sans intertitre : « Libellé ».
+        segments: list[tuple[str, list[list[str]]]] = []
+        hist_rows: list[list[str]] = []
         for rw in sorted(rows, key=col_key):
             lab = " ".join(ln.text for ln in sorted(rw["label"], key=lambda x: (-x.cy, x.l)))
-            cells = ([rw["group"]] if has_group else []) + [lab]
             vals = [v for v in values if id(v) in owner and owner[id(v)] in rw["bars"]
                     and id(owner[id(v)]) in held and v in held[id(owner[id(v)])]]
+            cells = [lab]
             if stacked:
                 by = {series.get(id(v)): v.text for v in vals}
-                cells += [by.get(s, "") for s in stacked]
+                cells += [by.get(s) or "–" for s in stacked]
             else:
-                cells += [vals[0].text if vals else ""]
-            cells += [rw["extra"].get(id(c), "") for c in extra_cols]
-            out_rows.append(cells)
-        blocks.append(_md_table(head, out_rows))
+                cells += [vals[0].text if vals else "–"]
+            cells += [rw["extra"].get(id(extra_cols[i])) or "–" for i in main]
+            if not segments or segments[-1][0] != rw["group"]:
+                segments.append((rw["group"], []))
+            segments[-1][1].append(cells)
+            hv = [rw["extra"].get(id(extra_cols[i])) or "–" for i in hist]
+            if hist and any(x != "–" for x in hv):
+                hist_rows.append(([rw["group"]] if any(r["group"] for r in rows) else [])
+                                 + [lab] + hv)
+        tail = (stacked if stacked else ["Valeur"]) + [heads[i] for i in main]
+        for group, seg_rows in segments:
+            blocks.append(_md_table([group or "Libellé"] + tail, seg_rows))
+        if hist_rows:
+            gh = ["Groupe"] if any(r["group"] for r in rows) else []
+            blocks.append(_md_table(gh + ["Libellé"] + [heads[i] for i in hist], hist_rows))
         kinds.append("barres empilées" if stacked else
                      "barres verticales" if vertical else "barres")
 
+    # Légende : libellés dont le carré est dans la zone mais qui ne figurent dans aucun
+    # tableau (ex. « 2023 » pour une série de barres simples)
+    shown = " ".join(blocks)
+    legend = []
+    for sw in pg.shapes:
+        if id(sw) in pg.swatches and inside(sw.cx, sw.cy):
+            lab = pg.legend_label(sw.color)
+            if lab and lab not in legend and f"| {lab} |" not in shown:
+                legend.append(lab)
+
     titles = [ln.text for ln in sorted(labels, key=lambda x: (-x.cy, x.l)) if id(ln) not in used]
-    parts = []
-    if titles:
-        parts.append("*" + " ; ".join(titles) + "*")
-    parts += blocks
-    if notes:
-        parts.append("\n".join("- " + n for n in notes))
-    return ChartResult(text="\n\n".join(parts), kind=" + ".join(kinds), values=len(values))
+    meta = ChartMeta(legend=legend, notes=notes)
+    meta.add_texts(titles)
+    body = "\n\n".join(blocks)
+    return ChartResult(text=render(meta, body), kind=" + ".join(kinds), values=len(values),
+                       meta=meta, body=body)
+
+
+def c_is_history(head: str) -> bool:
+    return bool(HISTORY_HEAD.search(head))
 
 
 class VectorDocument:

@@ -210,9 +210,10 @@ def test_vector_barres_avec_intertitres_et_texte_masque():
     doc = vc.VectorDocument(_pdf(ops, tmp / "barres.pdf"))
     res = doc.read(1, 40, 320, 400, 440)
     assert res is not None, doc.last_reason
-    assert "| Groupe | Libellé | Valeur |" in res.text
-    assert "| Sexe | Hommes | 52% |" in res.text and "| Sexe | Femmes | 34% |" in res.text
-    assert "| Âge | 18-24 ans | 36% |" in res.text
+    # un tableau par intertitre : l'intertitre devient l'en-tête de la première colonne
+    assert "| Sexe | Valeur |\n|---|---|\n| Hommes | 52% |\n| Femmes | 34% |" in res.text, res.text
+    assert "| Âge | Valeur |\n|---|---|\n| 18-24 ans | 36% |" in res.text, res.text
+    assert "Groupe" not in res.text
     assert "99" not in res.text
 
 
@@ -232,7 +233,8 @@ def test_vector_secteurs_rattaches_par_la_legende():
     assert res is not None, doc.last_reason
     t = res.text
     assert "| Non | 57% |\n| Oui, souvent | 23% |\n| Oui, parfois | 20% |" in t, t
-    assert "- Total Oui : 43%" in t
+    assert "Annotations : Total Oui : 43%" in t
+    assert t.index("Annotations") < t.index("| Non |"), t      # métadonnées avant le tableau
 
 
 def test_vector_barres_empilees_et_colonne_total():
@@ -249,6 +251,44 @@ def test_vector_barres_empilees_et_colonne_total():
     assert res is not None, doc.last_reason
     assert "| Libellé | Souvent | Jamais | Total Oui |" in res.text, res.text
     assert "| Regarder | 7% | 81% | 19% |" in res.text and "| Lire | 5% | 88% | 12% |" in res.text
+
+
+def test_vector_rappels_dans_un_tableau_a_part_et_legende():
+    vc, tmp = _vec()
+    ops = [_rect(40, 100, 10, 10, TEAL), _txt(55, 101, "Septembre 2026"),
+           _txt(320, 240, "Rappel 2025"),
+           _txt(60, 200, "Regarder"), _rect(120, 195, 100, 20, TEAL), _txt(225, 201, "40%"),
+           _txt(325, 201, "35%"),
+           _txt(60, 160, "Lire"), _rect(120, 155, 50, 20, TEAL), _txt(175, 161, "20%")]
+    doc = vc.VectorDocument(_pdf(ops, tmp / "rappels.pdf"))
+    res = doc.read(1, 40, 90, 380, 260)
+    assert res is not None, doc.last_reason
+    t = res.text
+    assert "| Libellé | Valeur |\n|---|---|\n| Regarder | 40% |\n| Lire | 20% |" in t, t
+    # rappel : tableau à part, seulement les lignes qui en ont un
+    assert "| Libellé | Rappel 2025 |\n|---|---|\n| Regarder | 35% |" in t, t
+    assert "| Lire | – |" not in t
+    assert "Légende : Septembre 2026" in t, t
+
+
+def test_metadonnees_reconnues():
+    from chart_format import ChartMeta, render, split_meta
+    assert split_meta("Question : Connaissez-vous X ? Base : ensemble des Français") == {
+        "question": "Connaissez-vous X ?", "base": "ensemble des Français"}
+    assert split_meta("Avec laquelle des deux affirmations êtes-vous d'accord ? "
+                      "(base: Ensemble de l'échantillon)") == {
+        "question": "Avec laquelle des deux affirmations êtes-vous d'accord ?",
+        "base": "Ensemble de l'échantillon"}
+    assert split_meta("Base : personnes connaissant X (43% des Français)") == {
+        "base": "personnes connaissant X (43% des Français)"}
+    assert split_meta("Source : Ifop, octobre 2026") == {"source": "Ifop, octobre 2026"}
+    # texte libre : rien n'est retiré du document
+    assert split_meta("Qui connaît Alain Soral ?") is None
+    assert split_meta("La database : 12 serveurs") is None
+    m = ChartMeta()
+    m.add_texts(["Qui connaît X ?", "Selon l'âge", "(base: Ensemble)"])
+    assert render(m, "| a | b |") == ("Titre : Qui connaît X ? ; Selon l'âge\nBase : Ensemble"
+                                      "\n\n| a | b |")
 
 
 def test_vector_refuse_si_un_nombre_reste_inexplique():
@@ -386,6 +426,36 @@ def test_fixture_anneau_sans_association_inventee():
     assert any("Qui se dit proche" in x for x in t17) and not any("ans" in x for x in t17)
 
 
+def test_fixture_metadonnees_de_page_dans_le_bloc_du_graphique():
+    if not FIXTURE.exists():
+        return "sauté"
+    from docling_core.types.doc import DoclingDocument, PictureItem
+    import pdf2llm as m
+    doc = DoclingDocument.load_from_json(FIXTURE)
+    pics = [it for it, _ in doc.iterate_items() if isinstance(it, PictureItem)]
+    decisions = {p.self_ref: m.PicDecision() for p in pics}
+    tab = "| Libellé | Valeur |\n|---|---|\n| X | 1% |"
+    for i in (6, 8, 14):                  # p. 7 (deux graphiques), p. 9 (anneau)
+        d = decisions[doc.pictures[i].self_ref]
+        d.action, d.text, d.body = "vector", tab, tab
+    m.build_chart_blocks(doc, pics, decisions)
+    p7a, p7b = decisions[doc.pictures[6].self_ref], decisions[doc.pictures[8].self_ref]
+    # « Question : ... ? Base : ... » (un seul bloc) -> premier graphique sous le texte
+    assert p7a.text.startswith("Question : *Vous personnellement, connaissez-vous, ne serait-ce "
+                               "que de nom, Alain Soral ?*\nBase : ensemble des Français\n\n| "), \
+        p7a.text
+    assert p7b.text == tab                # pas de doublon sur le second graphique
+    # p. 9 : question et base en deux blocs
+    p9 = decisions[doc.pictures[14].self_ref].text
+    assert "Question : *Au regard de ce que vous en savez" in p9, p9
+    assert "Base : personnes connaissant Alain Soral (43% des Français)" in p9, p9
+    md = m.doc_to_markdown(doc, decisions)
+    assert md.count("Vous personnellement, connaissez-vous") == 2   # p. 7 (bloc) + p. 8 (texte)
+    # p. 9 : dans le bloc seulement (celle de la p. 12 est dans une image, avalée par Docling)
+    assert md.count("personnes connaissant Alain Soral (43% des Français)") == 1
+    assert "Base : ensemble des Français" in md and md.count("ensemble des Français") == 1
+
+
 def test_fixture_lecture_vectorielle_du_vrai_pdf():
     """Le PDF de développement lui-même (variable PDF2LLM_TEST_PDF) + la fixture JSON."""
     pdf = os.environ.get("PDF2LLM_TEST_PDF")
@@ -405,7 +475,8 @@ def test_fixture_lecture_vectorielle_du_vrai_pdf():
     stacked = read(21)                    # barres empilées p. 12 + colonnes « Total Oui »
     assert stacked and "| 7% | 4% | 8% | 81% | 19% | 8% |" in stacked.text, doc.last_reason
     prof = read(10)                       # profil p. 8 : intertitres conservés
-    assert prof and "| Statut | CHOMEURS | 39% |" in prof.text, doc.last_reason
+    assert prof and "| Statut | Valeur |" in prof.text and "| CHOMEURS | 39% |" in prof.text, \
+        doc.last_reason
 
 
 if __name__ == "__main__":

@@ -26,6 +26,7 @@ Fichier de développement : sondage Ifop de 21 pages au format slides, pages 1 �
 | 8 | v6 | 167 s | 4 998 | **18 graphiques sur 18 lus dans la géométrie du PDF**, aucun recours à Granite ni Qwen pour les remplacer. Anneaux rattachés, intertitres conservés. |
 | 9 | v7 | **22 s** | 4 998 | Même Markdown, octet pour octet. Granite n'est plus exécuté pendant la conversion : aucun repli nécessaire sur ces pages. Voir § 6. |
 | 10 | v7.1 | – | – | Assistant interactif (`wizard.py`) et lanceur `pdf2llm.command` ; conversion inchangée. |
+| 11 | v8 | 227 s (Ipsos p. 10-25) | 4 710 | Format commun (`chart_format.py`) : métadonnées puis tableaux homogènes. Question / base reprises de la couche texte et retirées du flux (Ipsos : 8 blocs). Lecture vectorielle : un tableau par intertitre, rappels à part, légende non reprise conservée. Constat : sur Ipsos, aucun graphique lu en vectoriel (courbes non gérées) et tableaux Granite pauvres (`X / Y`, `Group 1`). |
 
 ## 3. Correctifs appliqués
 

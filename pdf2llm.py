@@ -63,6 +63,7 @@ from docling_core.transforms.serializer.markdown import (
     MarkdownDocSerializer,
     MarkdownParams,
     MarkdownPictureSerializer,
+    MarkdownTextSerializer,
 )
 from docling_core.types.doc import DoclingDocument, ImageRefMode, PictureItem
 
@@ -75,6 +76,8 @@ try:  # lecture exacte des graphiques vectoriels (vector_charts.py, à côté de
     from vector_charts import VectorDocument
 except ImportError:  # pragma: no cover
     VectorDocument = None  # type: ignore[assignment,misc]
+
+from chart_format import ChartMeta, render as render_chart, split_meta, looks_like_question
 
 log = logging.getLogger("pdf2llm")
 
@@ -710,6 +713,9 @@ class PicDecision:
     raw: str = ""                 # sortie brute du VLM avant contrôle (pour --dump-debug)
     page: int | None = None
     bbox: list[float] | None = None
+    meta: ChartMeta | None = None  # métadonnées du graphique (titre, question, base...)
+    body: str = ""                # tableaux seuls, sans les métadonnées
+    meta_refs: list[str] = field(default_factory=list)  # textes du PDF repris dans `meta`
 
 
 @dataclass
@@ -777,6 +783,98 @@ def bottom_left_bbox(doc: DoclingDocument, pic: PictureItem) -> tuple[float, flo
     return min(bb.l, bb.r), min(bb.b, bb.t), max(bb.l, bb.r), max(bb.b, bb.t)
 
 
+def _bl_box(doc: DoclingDocument, prov: Any) -> tuple[float, float, float, float]:
+    """Boîte d'un élément en points PDF, origine en bas à gauche : (gauche, bas, droite, haut)."""
+    bb = prov.bbox
+    if "TOP" in str(getattr(bb, "coord_origin", "")).upper():
+        bb = bb.to_bottom_left_origin(page_height=doc.pages[prov.page_no].size.height)
+    return min(bb.l, bb.r), min(bb.b, bb.t), max(bb.l, bb.r), max(bb.b, bb.t)
+
+
+def is_chart_data(d: PicDecision) -> bool:
+    """Sortie chiffrée d'un graphique (et pas un Mermaid ni une description de photo)."""
+    if not d.text or d.text.startswith("```mermaid"):
+        return False
+    if d.action in ("vector", "chart_table", "text_layer"):
+        return True
+    return d.action == "vlm" and any(l.lstrip().startswith("|") for l in d.text.splitlines())
+
+
+def page_meta_items(doc: DoclingDocument) -> list[tuple[Any, dict[str, str]]]:
+    """Textes du PDF qui sont entièrement une métadonnée de graphique : « Question : ... »,
+    « Base : ... », « (base: ...) », « Source : ... », ou question non étiquetée suivie
+    d'une base (Ipsos : la question et « (base: ...) » sont deux blocs)."""
+    texts = [t for t in doc.texts if t.prov and (t.text or "").strip()
+             and str(getattr(t, "label", "")).split(".")[-1].lower()
+             not in ("page_header", "page_footer")]
+    out = []
+    for i, t in enumerate(texts):
+        f = split_meta(t.text)
+        if f:
+            out.append((t, f))
+            continue
+        nxt = texts[i + 1] if i + 1 < len(texts) else None
+        if (nxt is not None and nxt.prov[0].page_no == t.prov[0].page_no
+                and looks_like_question(t.text)):
+            fn = split_meta(nxt.text)
+            if fn and set(fn) == {"base"}:
+                out.append((t, {"question": " ".join(t.text.split())}))
+    return out
+
+
+def build_chart_blocks(doc: DoclingDocument, pics: list[PictureItem],
+                       decisions: dict[str, PicDecision]) -> None:
+    """Met chaque graphique au format commun (chart_format) : métadonnées puis tableaux.
+
+    1. Titres lus dans l'image et avalés par Docling (déjà fait par vector_charts pour la
+       lecture vectorielle) ;
+    2. question, base et source de la page, prises dans la couche texte du PDF (jamais
+       demandées à un modèle) : question et base vont au premier graphique situé dessous,
+       la source au dernier graphique situé dessus, un texte DANS la boîte d'une image à
+       cette image. Le texte repris est retiré du flux (`meta_refs`) pour ne pas doubler."""
+    for pic in pics:
+        d = decisions[pic.self_ref]
+        if d.text and d.action in ("chart_table", "vlm") and not d.text.startswith("```mermaid"):
+            ttl = uncovered_titles(texts_near(doc, pic, 0), d.text)
+            if ttl:
+                d.meta = d.meta or ChartMeta()
+                d.meta.add_texts(ttl)
+                d.note = (d.note + " ; " if d.note else "") + "titre repris de la couche texte"
+
+    charts: dict[int, list[tuple[PictureItem, tuple]]] = {}
+    for pic in pics:
+        d = decisions[pic.self_ref]
+        if is_chart_data(d) and pic.prov:
+            charts.setdefault(pic.prov[0].page_no, []).append((pic, _bl_box(doc, pic.prov[0])))
+    for t, f in page_meta_items(doc):
+        page = t.prov[0].page_no
+        if page not in charts:
+            continue
+        l, b, r, top = _bl_box(doc, t.prov[0])
+        cx, cy = (l + r) / 2, (b + top) / 2
+        target = next((p for p, (pl, pb, pr, pt) in charts[page]
+                       if pl <= cx <= pr and pb <= cy <= pt), None)
+        if target is None and "source" in f:
+            below = [p for p, box in charts[page] if box[1] >= top - 5]
+            target = below[-1] if below else None
+        elif target is None:
+            target = next((p for p, box in charts[page] if box[3] <= b + 5), None)
+        if target is None:
+            continue
+        d = decisions[target.self_ref]
+        d.meta = d.meta or ChartMeta()
+        d.meta.add_fields(f)
+        # le texte n'est retiré du flux que si tout son contenu est dans le bloc
+        if all(getattr(d.meta, k) == v for k, v in f.items()):
+            d.meta_refs.append(t.self_ref)
+
+    for pic in pics:
+        d = decisions[pic.self_ref]
+        if d.text and d.meta:
+            d.body = d.body or d.text
+            d.text = render_chart(d.meta, d.body)
+
+
 def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClient | None,
                     assets_dir: Path, stem: str, img_offset: int,
                     vec: "VectorDocument | None" = None,
@@ -839,6 +937,7 @@ def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClie
                 vec.last_reason = f"erreur : {e}"
             if res is not None:
                 d.action, d.text = "vector", res.text
+                d.meta, d.body = res.meta, res.body
                 d.reason = f"graphique vectoriel lu dans le PDF ({res.kind})"
                 continue
             if label in CHART_LABELS:
@@ -875,7 +974,9 @@ def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClie
                 prob = chart_rows_problem(rows)
                 if prob is None:
                     d.action, d.reason = "chart_table", "données extraites par Granite Vision"
-                    d.text = rows_to_md(rows, getattr(tc, "title", None))
+                    d.text = rows_to_md(rows)
+                    if getattr(tc, "title", None):
+                        d.meta = ChartMeta(title=[tc.title.strip()])
                     continue
                 tabs = split_sparse(rows)
                 if tabs and all(chart_rows_problem(t) is None for t in tabs):
@@ -965,14 +1066,8 @@ def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClie
                     log.info("    VLM : %d/%d images", i, len(to_vlm))
         vlm.save_cache()
 
-    # Titres / sous-titres avalés avec l'image
-    for pic in pics:
-        d = decisions[pic.self_ref]
-        if d.text and d.action in ("chart_table", "vlm") and not d.text.startswith("```mermaid"):
-            ttl = uncovered_titles(texts_near(doc, pic, 0), d.text)
-            if ttl:
-                d.text = "*" + " ; ".join(ttl) + "*\n\n" + d.text
-                d.note = (d.note + " ; " if d.note else "") + "titre repris de la couche texte"
+    # Format commun : métadonnées (titre, question, base, source...) puis tableaux
+    build_chart_blocks(doc, pics, decisions)
 
     # Images conservées en WebP
     n = img_offset
@@ -1028,10 +1123,22 @@ if MarkdownTableSerializer is not None:
                                      span_source=item)
 
 
+class SkipTextSerializer(MarkdownTextSerializer):
+    """Ne sérialise pas les textes repris dans le bloc de métadonnées d'un graphique."""
+    skip: set[str] = set()
+
+    def serialize(self, *, item, doc_serializer, doc, **kwargs):
+        if item.self_ref in self.skip:
+            return create_ser_result(text="", span_source=item)
+        return super().serialize(item=item, doc_serializer=doc_serializer, doc=doc, **kwargs)
+
+
 def doc_to_markdown(doc: DoclingDocument, decisions: dict[str, PicDecision],
                     tables: dict[str, tuple[int, str]] | None = None) -> str:
     pic_ser = SubstitutePictureSerializer()
     pic_ser.decisions = decisions
+    txt_ser = SkipTextSerializer()
+    txt_ser.skip = {ref for d in decisions.values() for ref in d.meta_refs}
     params = MarkdownParams(
         image_mode=ImageRefMode.PLACEHOLDER,
         blocked_meta_names={"classification", "description", "tabular_chart", "code",
@@ -1045,7 +1152,8 @@ def doc_to_markdown(doc: DoclingDocument, decisions: dict[str, PicDecision],
         tab_ser = SubstituteTableSerializer()
         tab_ser.replacements = {ref: md for ref, (_pg, md) in tables.items()}
         extra["table_serializer"] = tab_ser
-    ser = MarkdownDocSerializer(doc=doc, picture_serializer=pic_ser, params=params, **extra)
+    ser = MarkdownDocSerializer(doc=doc, picture_serializer=pic_ser, text_serializer=txt_ser,
+                                params=params, **extra)
     md = ser.serialize().text
     md = re.sub(r"\n{3,}", "\n\n", md)
     return md.strip() + "\n"
