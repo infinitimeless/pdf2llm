@@ -39,6 +39,7 @@ from chart_format import ChartMeta, md_table, render, split_meta
 
 NUM_WORD = re.compile(r"^[-+−]?\d+(?:[.,]\d+)?%?$")
 YEAR = re.compile(r"^(?:19|20)\d{2}$")
+PCT_LEAD = re.compile(r"^\d+(?:[.,]\d+)?\s*%\s+[^\W\d]")   # « 19% chez ceux... »
 BULLET = re.compile(r"^\s*[\uf000-\uf8ff•▪▸►‣]\s*")      # puce (souvent un glyphe privé)
 WHITE = 235            # composante au-dessus de laquelle une couleur est « blanche »
 MARGIN_BOTTOM = 25     # bande du bas de page ignorée (numéro de slide, pied de page)
@@ -187,12 +188,14 @@ class VectorPage:
         def flush() -> None:
             if not cur:
                 return
-            txt = "".join(c[0] for c in cur).strip()
+            txt = "".join(c[0] for c in cur).strip().replace("\ufffe", "-")
+            txt = re.sub(r"%{2,}", "%", txt)            # glyphe « % » doublé (« 40%% »)
             if txt:
                 w = Word(min(c[1] for c in cur), min(c[2] for c in cur),
                          max(c[3] for c in cur), max(c[4] for c in cur),
                          text=txt, color=cur[0][5], size=max(c[6] for c in cur))
-                if txt == "%" and words and words[-1].is_num and w.l - words[-1].r < w.size:
+                if (txt == "%" and words and words[-1].is_num
+                        and -0.2 * w.size <= w.l - words[-1].r < w.size):
                     p = words[-1]                       # « 43 % » -> « 43% »
                     p.text, p.r = p.text + "%", w.r
                 else:
@@ -208,6 +211,8 @@ class VectorPage:
             # Boîte « large » (avance du caractère) : avec la boîte serrée, l'écart entre
             # deux « 1 » étroits ferait couper « 11% » en « 1 » + « 1% ».
             l, b, r, t = tp.get_charbox(i, loose=True)
+            l, r = min(l, r), max(l, r)                 # boîte parfois inversée (r < l)
+            b, t = min(b, t), max(b, t)
             if r - l <= 0 and t - b <= 0:
                 continue
             raw.FPDFText_GetFillColor(tp, i, ctypes.byref(r_), ctypes.byref(g_),
@@ -239,7 +244,10 @@ class VectorPage:
         for band in bands:
             ln = None
             for w in sorted(band, key=lambda w: w.l):
-                if ln is not None and w.l - ln.r <= 0.6 * max(w.size, ln.size):
+                # (pas de fusion entre tailles très différentes : le grand « 30 » d'un
+                # chiffre-clé et « catholicisme » de l'encadré voisin, même ligne de base)
+                if (ln is not None and w.l - ln.r <= 0.6 * min(w.size, ln.size)
+                        and max(w.size, ln.size) <= 1.5 * min(w.size, ln.size)):
                     ln.words.append(w)
                     ln.r, ln.t, ln.b = max(ln.r, w.r), max(ln.t, w.t), min(ln.b, w.b)
                     ln.size = max(ln.size, w.size)
@@ -308,7 +316,7 @@ class VectorPage:
                     and max(s.w, s.h) <= 4 * min(s.w, s.h)):
                 continue
             cands = [ln for ln in self.lines if ln.visible and not ln.is_num
-                     and 0 <= ln.l - s.r <= 25 and s.b - 3 <= ln.cy <= s.t + 3]
+                     and 0 <= ln.l - s.r <= 40 and s.b - 3 <= ln.cy <= s.t + 3]
             if cands:
                 ln = min(cands, key=lambda ln: ln.l - s.r)
                 found.setdefault(s.color, []).append((ln, s))
@@ -427,7 +435,7 @@ def read_region(pg: VectorPage, l: float, b: float, r: float, t: float,
     # Barres : rectangles pleins ; une barre de 1 % peut ne faire qu'un point de large
     # (pointes de flèche et pointillés : max < 4 pt, ignorés)
     bars = [s for s in shapes if s.rect and min(s.w, s.h) >= 0.8 and max(s.w, s.h) >= 4
-            and s.area < 0.25 * zone_area]
+            and s.area < 0.25 * zone_area and min(s.color) < 215]   # fond d'encadré pâle : non
 
     owner: dict[int, Shape] = {}            # id(valeur) -> forme
     series: dict[int, str] = {}             # id(valeur) -> libellé de légende
@@ -588,6 +596,34 @@ def read_region(pg: VectorPage, l: float, b: float, r: float, t: float,
             col["head"] = " ".join(ln.text for ln in reversed(stack))
             used.update(id(ln) for ln in stack)
 
+    # 5 bis) chiffre-clé : nombre isolé en très grand corps (« % Trop » / « 30 ») ; son
+    #    intitulé est le texte juste au-dessus. Il devient une annotation « % Trop : 30 ».
+    headline: list[tuple[str, Word]] = []
+    owned = [v.size for v in values if id(v) in owner]
+    if owned:
+        big = [v for v in values if id(v) not in owner and v.size >= 1.8 * median(owned)]
+        for v in big:
+            parts, last = [], v
+            for ln in sorted(labels, key=lambda x: x.cy):
+                if (id(ln) not in used and not re.search(r"\d", ln.text)
+                        and ln.r >= v.l - 80 and ln.l <= v.r + 80
+                        and -2 <= ln.b - last.t <= 0.9 * ln.size + (6 if last is v else 0)):
+                    parts.append(ln)
+                    last = ln
+            if parts:
+                rows_: list[list[Line]] = []
+                for ln in parts:           # même ligne (« % » et « Trop ») : gauche -> droite
+                    if rows_ and abs(rows_[-1][0].cy - ln.cy) < 0.5 * ln.size:
+                        rows_[-1].append(ln)
+                    else:
+                        rows_.append([ln])
+                lab = " ".join(" ".join(x.text for x in sorted(r_, key=lambda x: x.l))
+                               for r_ in reversed(rows_))
+                headline.append((lab, v))
+                used.update(id(ln) for ln in parts)
+        gone = {id(v) for _, v in headline}
+        values = [v for v in values if id(v) not in gone]
+
     # 6) annotations chiffrées (« Total Oui : 43% ») : lignes non utilisées portant un
     #    pourcentage ou « : nombre », précédées éventuellement d'un début de libellé
     #    juste au-dessus. (Une question qui cite une année reste un titre.)
@@ -595,13 +631,21 @@ def read_region(pg: VectorPage, l: float, b: float, r: float, t: float,
     # encadrés à puces (« ▸ 64% des moins de 35 ans contre » / « 53% de ceux qui... ») :
     # une puce = une annotation, avec ses lignes de suite (en retrait, juste dessous)
     by_y = sorted(labels, key=lambda x: -x.cy)
+    def starts_note(t: str) -> bool:      # puce, ou « 19% chez ... » (encadré sans puce)
+        return bool(BULLET.match(t) and re.search(r"\w", t)) or bool(PCT_LEAD.match(t))
     for ln in by_y:
-        if id(ln) in used or not BULLET.match(ln.text) or not re.search(r"\w", ln.text):
+        if id(ln) in used or not starts_note(ln.text):
             continue
+        indent = 30 if BULLET.match(ln.text) else 3
         parts, last = [BULLET.sub("", ln.text)], ln
         used.add(id(ln))
         for o in by_y:
-            if (id(o) not in used and not BULLET.match(o.text) and ln.l < o.l <= ln.l + 30
+            # (sous une puce, seule une nouvelle puce ouvre une nouvelle annotation :
+            #  « 53% de ceux qui... » est la suite de « ▸ 64% des moins de 35 ans contre »)
+            if (id(o) not in used
+                    and not (BULLET.match(o.text) if BULLET.match(ln.text) else starts_note(o.text))
+                    and ln.l - 3 <= o.l <= ln.l + indent and (indent > 3 or o.l > ln.l - 3)
+                    and (BULLET.match(ln.text) is None or o.l > ln.l)
                     and 0 < last.cy - o.cy <= 1.9 * o.size):
                 parts.append(o.text)
                 used.add(id(o))
@@ -717,12 +761,26 @@ def read_region(pg: VectorPage, l: float, b: float, r: float, t: float,
         if id(ln) in used or not re.search(r"\w", ln.text):
             continue
         # suite d'une phrase coupée en deux lignes (commence par une minuscule)
-        if (prev is not None and titles and ln.text[:1].islower()
+        if (prev is not None and titles
+                and (ln.text[:1].islower()
+                     or (len(titles[-1]) >= 50 and not titles[-1].rstrip().endswith(
+                         (".", "?", "!", ":", ";", "…"))))
                 and 0 < prev.cy - ln.cy <= 2 * ln.size and not split_meta(titles[-1])):
             titles[-1] += " " + ln.text
         else:
             titles.append(ln.text)
         prev = ln
+    # « RAPPELS 2020 : 30% » « 2017 : 37% »... d'un chiffre-clé unique : petit tableau
+    if len(headline) == 1:
+        lab, v = headline[0]
+        hist = [(m.group(1), m.group(2)) for n in notes
+                for m in [re.fullmatch(r"(?:RAPPELS?\s+)?((?:19|20)\d\d)\s*:\s*(\d+(?:[.,]\d+)?\s*%?)",
+                                       n.strip(), re.I)] if m]
+        if len(hist) >= 2:
+            notes = [n for n in notes if not re.fullmatch(
+                r"(?:RAPPELS?\s+)?(?:19|20)\d\d\s*:\s*\d+(?:[.,]\d+)?\s*%?", n.strip(), re.I)]
+            blocks.append("*Rappels*\n\n" + _md_table(["Année", lab], [[y, x] for y, x in hist]))
+    notes = [f"{lab} : {v.text}" for lab, v in headline] + notes
     meta = ChartMeta(legend=legend, notes=notes)
     meta.add_texts(titles)
     body = "\n\n".join(blocks)

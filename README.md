@@ -29,6 +29,10 @@ Dans une présentation exportée en PDF, un graphique n'est pas une image : les 
 - le **texte invisible** (recouvert par une forme, oublié dans la slide) est écarté grâce au rendu de la page ;
 - un graphique que Docling prend pour un **tableau** (barres empilées d'Ipsos lues comme une grille, colonnes décalées) est relu de la même façon ; le tableau de Docling n'est remplacé que si la lecture réussit (`vector_tables`) ;
 - des années seules au-dessus de colonnes sans barre (« 2024 2020 2017 » d'un bloc « Rappels ») sont des en-têtes : ces colonnes forment le tableau des rappels.
+- un **chiffre-clé** en très grand corps (« % Trop » / « 30 ») devient l'annotation « % Trop : 30 », et sa liste « RAPPELS 2020 : 30% … » un petit tableau Année / valeur ;
+- les encadrés (à puces, ou lignes commençant par « 19% chez … ») donnent une annotation par entrée ; un fond d'encadré pâle n'est pas une barre.
+
+**PDF sans couche texte** (capture d'écran, scan, « Exporter en PDF » d'une image : le rapport indique `kind: scan`) : aucune lecture exacte n'est possible, tout passe par le modèle vision et **aucun contrôle ne peut vérifier ses chiffres**. Convertir de préférence le PDF d'origine.
 
 Règle de sûreté : le tableau n'est utilisé que si **tous** les nombres visibles de la zone et toutes les barres sont expliqués. Sinon l'image suit le chemin habituel ci-dessous, et la raison est notée dans `_debug/*.pictures.json`. La lecture prend quelques millisecondes par graphique.
 

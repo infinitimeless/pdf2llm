@@ -891,16 +891,68 @@ def build_chart_blocks(doc: DoclingDocument, pics: list[PictureItem],
             continue
         d = decisions[target.self_ref]
         d.meta = d.meta or ChartMeta()
+        if f.get("base"):
+            # Docling colle parfois des libellés de légende à la base (« A tous Assez positif
+            # Assez négatif ») : on retire ceux qui sont déjà en-têtes du tableau
+            f = dict(f, base=strip_labels(f["base"], table_heads(d.body or d.text)))
         d.meta.add_fields(f)
         # le texte n'est retiré du flux que si tout son contenu est dans le bloc
         if all(getattr(d.meta, k) == v for k, v in f.items()):
             d.meta_refs.append(t.self_ref)
+
+    # Texte de la page fait seulement de libellés de légende déjà en en-tête d'un tableau
+    # de la page (« Très négatif Ni positif, ni négatif ») : retiré du flux
+    for page, items in charts.items():
+        heads: set[str] = set()
+        for p, _box in items:
+            heads |= table_heads(decisions[p.self_ref].body or decisions[p.self_ref].text)
+        if not heads:
+            continue
+        for t in doc.texts:
+            # (seulement du texte libre : jamais une cellule de tableau ni le texte d'une image)
+            parent = str(getattr(getattr(t, "parent", None), "cref", ""))
+            if parent.startswith(("#/tables", "#/pictures")):
+                continue
+            if (t.prov and t.prov[0].page_no == page and (t.text or "").strip()
+                    and not strip_labels(t.text, heads)):
+                decisions[items[0][0].self_ref].meta_refs.append(t.self_ref)
 
     for pic in pics:
         d = decisions[pic.self_ref]
         if d.text and d.meta:
             d.body = d.body or d.text
             d.text = render_chart(d.meta, d.body)
+
+
+def table_heads(md: str) -> set[str]:
+    """Libellés des tableaux Markdown d'un bloc : en-têtes de colonnes (hors première) et
+    libellés de lignes (première colonne ; ex. légende d'un anneau)."""
+    out: set[str] = set()
+    lines = md.splitlines()
+    for i, l in enumerate(lines[:-1]):
+        if l.startswith("| ") and lines[i + 1].startswith("|---"):
+            out.update(c.strip() for c in l.strip().strip("|").split("|")[1:] if c.strip())
+    for i, l in enumerate(lines):
+        is_head = i + 1 < len(lines) and lines[i + 1].startswith("|---")
+        if l.startswith("| ") and not is_head:
+            first = l.strip().strip("|").split("|")[0].strip()
+            if first and not re.fullmatch(r"[\d\s%.,–-]+", first):
+                out.add(first)
+    return out
+
+
+def strip_labels(text: str, labels: set[str]) -> str:
+    """Retire en fin de texte, autant de fois que possible, des libellés de `labels`."""
+    t = " ".join(text.split())
+    changed = True
+    while t and changed:
+        changed = False
+        for lab in sorted(labels, key=len, reverse=True):
+            if t == lab or t.endswith(" " + lab):
+                t = t[: len(t) - len(lab)].rstrip()
+                changed = True
+                break
+    return t
 
 
 def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClient | None,

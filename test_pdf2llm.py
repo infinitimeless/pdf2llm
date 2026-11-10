@@ -306,6 +306,56 @@ def test_vector_slide_ipsos_legende_haute_segment_etroit_et_rappels():
             "| Opinion A | 44 | 39 |\n| Opinion B | 50 | – |") in t, t
 
 
+def test_libelles_de_legende_colles_a_la_base():
+    import pdf2llm as m
+    body = ("| Libellé | Très positif | Assez positif | Assez négatif |\n|---|---|---|---|\n"
+            "| France | 17 | 40 | 17 |")
+    heads = m.table_heads(body)
+    assert {"Très positif", "Assez positif", "Assez négatif", "France"} == heads
+    # Docling colle les libellés de légende à « Base: A tous » (Ipsos p. 38)
+    assert m.strip_labels("A tous Assez positif Assez négatif", heads) == "A tous"
+    assert m.strip_labels("Très positif Assez négatif", heads) == ""      # texte retiré
+    assert m.strip_labels("Les Français positifs", heads) == "Les Français positifs"
+
+
+def test_vector_legende_a_32_points_du_repere():
+    """Ipsos p. 38 : « Très négatif » est à 32 pt de son repère."""
+    vc, tmp = _vec()
+    ops = [_txt(60, 401, "France"), _rect(300, 395, 100, 18, TEAL), _txt(340, 401, "57"),
+           _rect(400, 395, 50, 18, CORAL), _txt(420, 401, "43"),
+           _rect(100, 60, 5, 19, TEAL), _txt(137, 64, "Positif"),
+           _rect(250, 60, 5, 19, CORAL), _txt(287, 64, "Negatif")]
+    doc = vc.VectorDocument(_pdf(ops, tmp / "ecart.pdf"))
+    res = doc.read(1, 40, 50, 800, 430)
+    assert res is not None, doc.last_reason
+    assert "| Libellé | Positif | Negatif |" in res.text and "| France | 57 | 43 |" in res.text
+
+
+def test_vector_chiffre_cle_rappels_et_encadre():
+    """Ipsos p. 35 : « % Trop » / grand « 30 » / « RAPPELS 2020 : 30% »..., encadré pâle
+    « 47% chez ceux ... » sur deux lignes, sur la même ligne de base que le « 30 »."""
+    vc, tmp = _vec()
+    red, green, pale = (0.75, 0, 0), (0.18, 0.7, 0.45), (0.9, 0.92, 0.94)
+    ops = [_rect(100, 200, 120, 30, red), _txt(150, 210, "30", rgb=(1, 1, 1)),
+           _rect(220, 200, 280, 30, green), _txt(350, 210, "70", rgb=(1, 1, 1)),
+           _txt(60, 210, "Opinion"),
+           _txt(560, 400, "% Trop", size=24), _txt(560, 330, "30", size=66),
+           _txt(565, 300, "RAPPELS", size=10), _txt(565, 286, "2020 : 30%", size=10),
+           _txt(565, 272, "2017 : 37%", size=10),
+           _rect(700, 300, 200, 100, pale),
+           _txt(710, 370, "47% chez ceux d'une", size=12), _txt(710, 355, "autre religion", size=12),
+           _txt(710, 330, "36% chez les CSP-", size=12),
+           _rect(100, 60, 5, 19, red), _txt(115, 64, "Trop"),
+           _rect(250, 60, 5, 19, green), _txt(265, 64, "Comme il faut")]
+    doc = vc.VectorDocument(_pdf(ops, tmp / "cle.pdf"))
+    res = doc.read(1, 40, 50, 920, 450)
+    assert res is not None, doc.last_reason
+    t = res.text
+    assert "Annotations : % Trop : 30 ; 47% chez ceux d'une autre religion ; 36% chez les CSP-" in t, t
+    assert "| Opinion | 30 | 70 |" in t, t
+    assert "*Rappels*\n\n| Année | % Trop |\n|---|---|\n| 2020 | 30% |\n| 2017 | 37% |" in t, t
+
+
 def test_metadonnees_reconnues():
     from chart_format import ChartMeta, render, split_meta
     assert split_meta("Question : Connaissez-vous X ? Base : ensemble des Français") == {
