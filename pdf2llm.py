@@ -273,6 +273,14 @@ def save_webp(img: Image.Image, path: Path, max_side: int, quality: int) -> int:
 # Client du modèle vision (API compatible OpenAI : LM Studio, Ollama, vLLM, OpenAI...)
 # --------------------------------------------------------------------------------------
 class VlmClient:
+    """Client du modèle vision. Erreurs triées (v9) : une erreur HTTP 4xx (sauf 408 et 429)
+    est permanente (ex. 400 « ce modèle n'accepte pas d'image ») et n'est pas réessayée ;
+    délai dépassé, connexion refusée, 5xx, 408 et 429 sont réessayés (3 essais). Coupe-
+    circuit : après BREAKER images d'affilée en échec de connexion ou de délai, le client
+    se désactive pour le reste de l'exécution (les images restent en WebP)."""
+    ATTEMPTS = 3
+    BREAKER = 3
+
     def __init__(self, url: str, model: str, api_key: str | None, timeout: float,
                  max_side: int, cache_path: Path, max_tokens: int):
         self.endpoint = url.rstrip("/")
@@ -287,6 +295,11 @@ class VlmClient:
         self.max_tokens = max_tokens
         self.cache_path = cache_path
         self._lock = threading.Lock()
+        self.disabled = False          # coupe-circuit déclenché
+        self.consecutive = 0           # images d'affilée en échec de connexion / délai
+        self.disabled_after = 0        # nombre d'échecs qui ont déclenché le coupe-circuit
+        self.refused = 0               # appels non faits car le client est désactivé
+        self._logged: set[int] = set() # codes HTTP permanents déjà journalisés
         try:
             self.cache: dict[str, str] = json.loads(cache_path.read_text("utf-8"))
         except (FileNotFoundError, json.JSONDecodeError):
@@ -321,21 +334,67 @@ class VlmClient:
                 ],
             }],
         }
-        for attempt in range(3):
+        with self._lock:
+            if self.disabled:
+                self.refused += 1
+                return None
+        network_failure = False
+        for attempt in range(self.ATTEMPTS):
+            if attempt:
+                time.sleep(2 * attempt)            # attente croissante entre les essais
             try:
                 r = requests.post(self.endpoint, json=payload, headers=self.headers,
                                   timeout=self.timeout)
-                r.raise_for_status()
-                text = r.json()["choices"][0]["message"]["content"] or ""
-                text = clean_vlm_output(text)
-                if mode == "table":
-                    text = keep_table_only(text)
-                with self._lock:
-                    self.cache[key] = text
-                return text
+            except (requests.Timeout, requests.ConnectionError) as e:
+                network_failure = True
+                log.warning("Appel VLM échoué (essai %d/%d) : %s", attempt + 1,
+                            self.ATTEMPTS, e)
+                continue
             except Exception as e:  # noqa: BLE001
-                log.warning("Appel VLM échoué (essai %d/3) : %s", attempt + 1, e)
-                time.sleep(2 * (attempt + 1))
+                network_failure = False
+                log.warning("Appel VLM échoué (essai %d/%d) : %s", attempt + 1,
+                            self.ATTEMPTS, e)
+                continue
+            code = r.status_code
+            if 400 <= code < 500 and code not in (408, 429):
+                # erreur permanente : la réessayer ne sert à rien
+                with self._lock:
+                    first = code not in self._logged
+                    self._logged.add(code)
+                    self.consecutive = 0
+                if first:
+                    log.error("Modèle vision : erreur HTTP %d, non réessayée : %s", code,
+                              (r.text or "")[:300])
+                return None
+            if code >= 400:                        # 5xx, 408, 429 : passagère
+                network_failure = False
+                log.warning("Appel VLM échoué (essai %d/%d) : HTTP %d", attempt + 1,
+                            self.ATTEMPTS, code)
+                continue
+            try:
+                text = r.json()["choices"][0]["message"]["content"] or ""
+            except Exception as e:  # noqa: BLE001
+                network_failure = False
+                log.warning("Réponse VLM illisible (essai %d/%d) : %s", attempt + 1,
+                            self.ATTEMPTS, e)
+                continue
+            text = clean_vlm_output(text)
+            if mode == "table":
+                text = keep_table_only(text)
+            with self._lock:
+                self.cache[key] = text
+                self.consecutive = 0
+            return text
+        with self._lock:
+            if network_failure:
+                self.consecutive += 1
+                if self.consecutive >= self.BREAKER and not self.disabled:
+                    self.disabled, self.disabled_after = True, self.consecutive
+                    log.error("Modèle vision désactivé après %d images d'affilée sans réponse "
+                              "(connexion ou délai) : les images suivantes restent en WebP",
+                              self.consecutive)
+            else:
+                self.consecutive = 0
         return None
 
 
@@ -1689,6 +1748,7 @@ def process_pdf(pdf: Path, out_dir: Path, pool: ConverterPool,
                 vlm: VlmClient | None, args: argparse.Namespace) -> DocReport:
     t0 = time.time()
     chrono = Chrono()
+    vlm_state = (vlm.disabled, vlm.refused) if vlm is not None else None
     stem = pdf.stem
     assets_dir = out_dir / f"{stem}_assets"
     rep = DocReport(pdf=pdf.name)
@@ -1771,6 +1831,10 @@ def process_pdf(pdf: Path, out_dir: Path, pool: ConverterPool,
     (out_dir / f"{stem}.md").write_text(md, "utf-8")
     chrono.add("serialisation", time.perf_counter() - t_ser)
 
+    if vlm is not None and vlm.disabled and vlm_state is not None and (
+            not vlm_state[0] or vlm.refused > vlm_state[1]):
+        rep.warnings.append(f"modèle vision désactivé après {vlm.disabled_after} échecs "
+                            "consécutifs")
     rep.seconds = round(time.time() - t0, 1)
     rep.durees = {k: round(v, 1) for k, v in chrono.durees.items()}
     rep.ram_max_mo = peak_rss_mb()

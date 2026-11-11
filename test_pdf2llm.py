@@ -705,6 +705,56 @@ def test_v9_t6_double_lecture_granite_vlm():
     assert p.build_parser().parse_args(["a", "b", "--no-cross-check"]).no_cross_check
 
 
+def test_v9_t8_client_vlm_erreurs_et_coupe_circuit():
+    import requests
+    from PIL import Image
+    _, tmp = _vec()
+    calls = []
+    orig_post, orig_sleep = p.requests.post, p.time.sleep
+    p.time.sleep = lambda s: None
+
+    def client():
+        return p.VlmClient("http://x/v1", "m", None, 1, 64, tmp / "c.json", 10)
+
+    def img(i):
+        return Image.new("RGB", (8, 8), (i, 0, 0))     # image différente : pas de cache
+    try:
+        # 400 permanent : un seul appel, pas de réessai
+        p.requests.post = lambda *a, **k: (calls.append(1), NS(status_code=400,
+                                           text="model does not support images"))[1]
+        assert client().ask(img(1), "photo") is None and len(calls) == 1
+        # délai dépassé : 3 essais
+        calls.clear()
+
+        def timeout(*a, **k):
+            calls.append(1)
+            raise requests.Timeout("lent")
+        p.requests.post = timeout
+        assert client().ask(img(2), "photo") is None and len(calls) == 3
+        # 3 images en échec de connexion -> la 4e ne fait aucun appel
+        calls.clear()
+
+        def refused(*a, **k):
+            calls.append(1)
+            raise requests.ConnectionError("refusé")
+        p.requests.post = refused
+        c = client()
+        for i in range(3):
+            assert c.ask(img(10 + i), "photo") is None
+        assert c.disabled and len(calls) == 9 and c.disabled_after == 3
+        assert c.ask(img(20), "photo") is None and len(calls) == 9 and c.refused == 1
+        # une réponse réussie remet le compteur à zéro ; 503 est réessayé
+        calls.clear()
+        seq = iter([NS(status_code=503, text=""),
+                    NS(status_code=200, json=lambda: {"choices": [{"message": {"content": "ok"}}]})])
+        p.requests.post = lambda *a, **k: (calls.append(1), next(seq))[1]
+        c = client()
+        c.consecutive = 2
+        assert c.ask(img(30), "photo") == "ok" and len(calls) == 2 and c.consecutive == 0
+    finally:
+        p.requests.post, p.time.sleep = orig_post, orig_sleep
+
+
 # --------------------------------------------------------------------------------------
 # Golden : sortie complète comparée à une version validée (tools/golden.py)
 # --------------------------------------------------------------------------------------
