@@ -726,6 +726,63 @@ def install_granite_csv_patch() -> None:
 
 
 # --------------------------------------------------------------------------------------
+# Mesures : durée par étape, pic de mémoire (T1, v9)
+# --------------------------------------------------------------------------------------
+STAGES = ("triage", "docling", "vectoriel", "granite", "vlm", "tableaux", "serialisation")
+
+
+class Chrono:
+    """Cumule des durées (secondes, horloge murale) par étape. Les appels parallèles au
+    modèle vision sont chronométrés en bloc (durée du lot), pas additionnés par fil."""
+
+    def __init__(self) -> None:
+        self.durees: dict[str, float] = {k: 0.0 for k in STAGES}
+        self._lock = threading.Lock()
+
+    def add(self, stage: str, seconds: float) -> None:
+        with self._lock:
+            self.durees[stage] = self.durees.get(stage, 0.0) + seconds
+
+    def __call__(self, stage: str) -> "_Span":
+        return _Span(self, stage)
+
+
+class _Span:
+    def __init__(self, chrono: Chrono, stage: str):
+        self.chrono, self.stage = chrono, stage
+
+    def __enter__(self) -> "_Span":
+        self.t0 = time.perf_counter()
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.chrono.add(self.stage, time.perf_counter() - self.t0)
+
+
+def rss_to_mb(raw: float, system: str) -> float:
+    """`ru_maxrss` est en OCTETS sous macOS et en KILO-octets sous Linux : -> Mo."""
+    return raw / (1024 * 1024) if system == "Darwin" else raw / 1024
+
+
+def peak_rss_mb() -> float:
+    """Pic de mémoire résidente du processus depuis son lancement (Mo), 0 si inconnu."""
+    try:
+        import platform
+        import resource
+        return round(rss_to_mb(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+                               platform.system()), 1)
+    except Exception:  # noqa: BLE001  (Windows : pas de module resource)
+        return 0.0
+
+
+def fmt_durees(durees: dict[str, float], ram_mb: float) -> str:
+    """« durées : docling 14 s, granite 210 s, vlm 31 s ; RAM max 9,8 Go »"""
+    parts = [f"{k} {v:.0f} s" for k, v in durees.items() if v >= 0.5]
+    ram = f"{ram_mb / 1024:.1f} Go".replace(".", ",") if ram_mb else "inconnue"
+    return "durées : " + (", ".join(parts) or "–") + " ; RAM max " + ram
+
+
+# --------------------------------------------------------------------------------------
 # Décision par image
 # --------------------------------------------------------------------------------------
 @dataclass
@@ -760,6 +817,8 @@ class DocReport:
     kind: str = ""                # triage : texte | présentation | scan
     granite_pages: list[int] = field(default_factory=list)   # pages reconverties par Granite
     vector_tables: int = 0        # « tableaux » Docling relus comme graphiques vectoriels
+    durees: dict[str, float] = field(default_factory=dict)   # secondes par étape (STAGES)
+    ram_max_mo: float = 0.0       # pic de mémoire résidente du processus (Mo)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -958,10 +1017,12 @@ def strip_labels(text: str, labels: set[str]) -> str:
 def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClient | None,
                     assets_dir: Path, stem: str, img_offset: int,
                     vec: "VectorDocument | None" = None,
-                    granite: Any = None) -> dict[str, PicDecision]:
+                    granite: Any = None, chrono: Chrono | None = None) -> dict[str, PicDecision]:
     """Décide du sort de chaque image. `vec` : lecture vectorielle (prioritaire).
     `granite(pages) -> {page: [(boîte, tabular_chart)]}` : repli Granite Vision appelé
-    une seule fois, pour les pages dont un graphique n'a pas été lu en vectoriel."""
+    une seule fois, pour les pages dont un graphique n'a pas été lu en vectoriel.
+    `chrono` : cumul des durées des étapes vectoriel, granite et vlm."""
+    chrono = chrono or Chrono()
     pics: list[PictureItem] = [it for it, _ in doc.iterate_items() if isinstance(it, PictureItem)]
     decisions: dict[str, PicDecision] = {}
     images: dict[str, Image.Image] = {}
@@ -1011,7 +1072,8 @@ def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClie
         #    Rendu seulement si TOUS les nombres visibles de la zone sont expliqués.
         if vec is not None and d.page:
             try:
-                res = vec.read(d.page, *bottom_left_bbox(doc, pic))
+                with chrono("vectoriel"):
+                    res = vec.read(d.page, *bottom_left_bbox(doc, pic))
             except Exception as e:  # noqa: BLE001
                 res = None
                 vec.last_reason = f"erreur : {e}"
@@ -1031,7 +1093,8 @@ def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClie
                and decisions[p.self_ref].page]
     if pending and granite is not None:
         try:
-            found = granite({decisions[p.self_ref].page for p in pending})
+            with chrono("granite"):
+                found = granite({decisions[p.self_ref].page for p in pending})
         except Exception as e:  # noqa: BLE001
             log.warning("Repli Granite Vision impossible : %s", e)
             found = {}
@@ -1125,6 +1188,7 @@ def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClie
                     note = (note + " ; " if note else "") + "valeurs ajoutées depuis la couche texte"
             return p.self_ref, text, raw, note
 
+        t_vlm = time.perf_counter()
         with ThreadPoolExecutor(max_workers=args.vlm_workers) as ex:
             for i, (ref, text, raw, note) in enumerate(ex.map(work, to_vlm), 1):
                 d = decisions[ref]
@@ -1145,11 +1209,13 @@ def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClie
                     vlm.save_cache()
                     log.info("    VLM : %d/%d images", i, len(to_vlm))
         vlm.save_cache()
+        chrono.add("vlm", time.perf_counter() - t_vlm)
 
     # Format commun : métadonnées (titre, question, base, source...) puis tableaux
     build_chart_blocks(doc, pics, decisions)
 
-    # Images conservées en WebP
+    # Images conservées en WebP (écriture de la sortie)
+    t_out = time.perf_counter()
     n = img_offset
     for pic in pics:
         d = decisions[pic.self_ref]
@@ -1162,6 +1228,7 @@ def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClie
             name = f"img_{n:04d}.webp"
             save_webp(images[pic.self_ref], assets_dir / name, args.max_side, args.webp_quality)
             d.image_rel = f"{stem}_assets/{name}"
+    chrono.add("serialisation", time.perf_counter() - t_out)
     return decisions
 
 
@@ -1430,6 +1497,7 @@ def dump_debug(doc: DoclingDocument, decisions: dict[str, PicDecision], debug_di
 def process_pdf(pdf: Path, out_dir: Path, pool: ConverterPool,
                 vlm: VlmClient | None, args: argparse.Namespace) -> DocReport:
     t0 = time.time()
+    chrono = Chrono()
     stem = pdf.stem
     assets_dir = out_dir / f"{stem}_assets"
     rep = DocReport(pdf=pdf.name)
@@ -1443,15 +1511,17 @@ def process_pdf(pdf: Path, out_dir: Path, pool: ConverterPool,
     all_decisions: list[PicDecision] = []
     debug_dir = out_dir / "_debug"
     try:
-        profiles = profile_pages(pdf, first, last)
-        rep.kind = pdf_kind(profiles)
+        with chrono("triage"):
+            profiles = profile_pages(pdf, first, last)
+            rep.kind = pdf_kind(profiles)
         log.info("  type : %s", rep.kind)
     except Exception as e:  # noqa: BLE001
         log.warning("Triage impossible : %s", e)
     vec = None
     if VectorDocument is not None and not args.no_vector:
         try:
-            vec = VectorDocument(pdf)
+            with chrono("vectoriel"):
+                vec = VectorDocument(pdf)
         except Exception as e:  # noqa: BLE001
             log.warning("Lecture vectorielle désactivée pour ce PDF : %s", e)
 
@@ -1465,14 +1535,19 @@ def process_pdf(pdf: Path, out_dir: Path, pool: ConverterPool,
     for start in range(first, last + 1, chunk):
         end = min(last, start + chunk - 1)
         log.info("  pages %d-%d / %d", start, end, total)
-        res = converter.convert(pdf, page_range=(start, end))
+        with chrono("docling"):
+            res = converter.convert(pdf, page_range=(start, end))
         doc = res.document
-        decisions = decide_pictures(doc, args, vlm, assets_dir, stem, img_count, vec, granite)
+        decisions = decide_pictures(doc, args, vlm, assets_dir, stem, img_count, vec, granite,
+                                    chrono)
         img_count += sum(1 for d in decisions.values() if d.image_rel)
         all_decisions.extend(decisions.values())
-        vtabs = vector_tables(doc, vec)
-        tables = decide_tables(doc, args, vlm, page_numbers(doc), set(vtabs))
-        md_parts.append(doc_to_markdown(doc, decisions, tables, vtabs))
+        with chrono("vectoriel"):
+            vtabs = vector_tables(doc, vec)
+        with chrono("tableaux"):     # y compris les relectures de tableaux par le VLM
+            tables = decide_tables(doc, args, vlm, page_numbers(doc), set(vtabs))
+        with chrono("serialisation"):
+            md_parts.append(doc_to_markdown(doc, decisions, tables, vtabs))
         rep.vector_tables += len(vtabs)
         rep.warnings.extend(table_warnings(doc, set(tables) | set(vtabs)))
         rep.warnings.extend(f"p. {pg} : tableau irrégulier corrigé automatiquement"
@@ -1483,12 +1558,17 @@ def process_pdf(pdf: Path, out_dir: Path, pool: ConverterPool,
     if vec is not None:
         vec.close()
 
+    t_ser = time.perf_counter()
     md = "\n".join(md_parts)
     if not args.no_denoise:
         md, rep.noise_lines_removed = denoise_markdown(md)
     (out_dir / f"{stem}.md").write_text(md, "utf-8")
+    chrono.add("serialisation", time.perf_counter() - t_ser)
 
     rep.seconds = round(time.time() - t0, 1)
+    rep.durees = {k: round(v, 1) for k, v in chrono.durees.items()}
+    rep.ram_max_mo = peak_rss_mb()
+    log.info("  %s", fmt_durees(rep.durees, rep.ram_max_mo))
     rep.pictures = len(all_decisions)
     for d in all_decisions:
         key = d.action if d.action != "drop" else f"drop ({d.reason})"

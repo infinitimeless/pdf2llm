@@ -150,6 +150,22 @@ def test_v5_1_avertissement_tableau_corrige():
         p.irregular_tables = orig
 
 
+def test_v9_t1_unites_de_la_ram_et_chrono():
+    # ru_maxrss : octets sous macOS, kilo-octets sous Linux
+    assert p.rss_to_mb(512 * 1024 * 1024, "Darwin") == 512
+    assert p.rss_to_mb(512 * 1024, "Linux") == 512
+    assert p.peak_rss_mb() > 10                  # ce processus occupe plus de 10 Mo
+    c = p.Chrono()
+    with c("docling"):
+        pass
+    c.add("vlm", 2.0)
+    c.add("vlm", 1.5)
+    assert set(p.STAGES) == set(c.durees) and c.durees["vlm"] == 3.5
+    assert p.fmt_durees({"docling": 14.2, "vlm": 31, "granite": 0.1}, 10035) == \
+        "durées : docling 14 s, vlm 31 s ; RAM max 9,8 Go"
+    assert "durees" in p.asdict(p.DocReport(pdf="x")) and "ram_max_mo" in p.asdict(p.DocReport(pdf="x"))
+
+
 # --------------------------------------------------------------------------------------
 # Lecture vectorielle (vector_charts.py) sur des PDF factices générés ici
 # --------------------------------------------------------------------------------------
