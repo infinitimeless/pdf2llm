@@ -140,6 +140,31 @@ commentaire, pas de tendance, pas d'interprétation."""
 # Classes d'images dont le contenu est chiffré : on demande directement un tableau au VLM
 TABLE_MODE_LABELS = CHART_LABELS | {"table"}
 
+# Provenance des chiffres lus par un modèle (ligne « Lecture : » du bloc, v9). Une lecture
+# exacte (géométrie du PDF) n'a pas de ligne : c'est le cas par défaut, sans token.
+READERS = {
+    "granite": "modèle (Granite Vision)",
+    "vlm": "modèle vision",
+    "2": "2 modèles concordants",
+}
+
+
+def lecture_text(reader: str) -> str:
+    """« Lecture : » d'un graphique ou d'un tableau dont les chiffres viennent d'un modèle."""
+    return f"{READERS[reader]}, valeurs non vérifiées"
+
+
+def has_md_table(text: str) -> bool:
+    return any(l.lstrip().startswith("|") for l in text.splitlines())
+
+
+def vlm_reads_numbers(label: str, text: str) -> bool:
+    """La sortie du modèle vision porte-t-elle des chiffres lus par lui ? Tableau, ou texte
+    chiffré d'un graphique / tableau. Pas un Mermaid ni une description de photo."""
+    if not text or text.startswith("```mermaid"):
+        return False
+    return has_md_table(text) or (label in TABLE_MODE_LABELS and bool(re.search(r"\d", text)))
+
 
 # --------------------------------------------------------------------------------------
 # Utilitaires image
@@ -557,12 +582,13 @@ def vector_tables(doc: DoclingDocument, vec: "VectorDocument | None") -> dict[st
 
 def decide_tables(doc: DoclingDocument, args: argparse.Namespace, vlm: "VlmClient | None",
                   pnums: dict[int, set[str]],
-                  skip: set[str] | None = None) -> dict[str, tuple[int, str]]:
+                  skip: set[str] | None = None) -> dict[str, tuple[int, str, str]]:
     """Tableaux à grille irrégulière : 1) correctif déterministe si le motif est reconnu ;
     2) sinon relecture de l'image par le VLM, retenue seulement si elle a au moins autant de
     lignes (à 2 près) et si ses nombres figurent dans la couche texte de la page ;
-    3) sinon on garde la version de Docling. `skip` : déjà lus en vectoriel."""
-    out: dict[str, tuple[int, str]] = {}
+    3) sinon on garde la version de Docling. `skip` : déjà lus en vectoriel.
+    Renvoie {ref: (page, markdown, source)}, source = "regle" (sans modèle) ou "vlm"."""
+    out: dict[str, tuple[int, str, str]] = {}
     for it in irregular_tables(doc):
         if it.self_ref in (skip or set()):
             continue
@@ -571,7 +597,7 @@ def decide_tables(doc: DoclingDocument, args: argparse.Namespace, vlm: "VlmClien
             grid = [[(c.text or "").strip() for c in row] for row in it.data.grid]
             md = fixed_table_md(grid)
             if md:
-                out[it.self_ref] = (page, md)
+                out[it.self_ref] = (page, md, "regle")
                 log.info("    p.%s : tableau décalé corrigé (colonne de tête remise en place)", page)
                 continue
             if vlm is None or args.no_table_fallback:
@@ -589,7 +615,7 @@ def decide_tables(doc: DoclingDocument, args: argparse.Namespace, vlm: "VlmClien
             if invented_values(text, pnums.get(page, set()), 0.1):
                 log.info("    p.%s : tableau irrégulier, relecture VLM douteuse -> Docling", page)
                 continue
-            out[it.self_ref] = (page, text)
+            out[it.self_ref] = (page, "Lecture : " + lecture_text("vlm") + "\n\n" + text, "vlm")
             log.info("    p.%s : tableau irrégulier remplacé par la relecture du VLM", page)
         except Exception as e:  # noqa: BLE001
             log.warning("Correction de tableau impossible : %s", e)
@@ -800,6 +826,7 @@ class PicDecision:
     meta: ChartMeta | None = None  # métadonnées du graphique (titre, question, base...)
     body: str = ""                # tableaux seuls, sans les métadonnées
     meta_refs: list[str] = field(default_factory=list)  # textes du PDF repris dans `meta`
+    lecture: str = ""             # provenance des chiffres lus par un modèle (« Lecture : »)
 
 
 @dataclass
@@ -978,6 +1005,9 @@ def build_chart_blocks(doc: DoclingDocument, pics: list[PictureItem],
 
     for pic in pics:
         d = decisions[pic.self_ref]
+        if d.text and d.lecture:          # provenance : dernière ligne de métadonnées
+            d.meta = d.meta or ChartMeta()
+            d.meta.lecture = d.lecture
         if d.text and d.meta:
             d.body = d.body or d.text
             d.text = render_chart(d.meta, d.body)
@@ -1117,6 +1147,7 @@ def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClie
                 prob = chart_rows_problem(rows)
                 if prob is None:
                     d.action, d.reason = "chart_table", "données extraites par Granite Vision"
+                    d.lecture = lecture_text("granite")
                     d.text = rows_to_md(rows)
                     if getattr(tc, "title", None):
                         d.meta = ChartMeta(title=[tc.title.strip()])
@@ -1125,6 +1156,7 @@ def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClie
                 if tabs and all(chart_rows_problem(t) is None for t in tabs):
                     d.action, d.reason = "chart_table", "données extraites par Granite Vision"
                     d.note = "tableau Granite fusionné, scindé en %d" % len(tabs)
+                    d.lecture = lecture_text("granite")
                     d.text = "\n\n".join(rows_to_md(t) for t in tabs)
                     continue
                 d.note = (d.note + " ; " if d.note else "") + f"Granite rejeté : {prob}"
@@ -1202,9 +1234,9 @@ def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClie
                 else:
                     d.text = text
                     d.reason = ("mermaid" if text.startswith("```mermaid")
-                                else "table VLM" if any(l.lstrip().startswith("|")
-                                                        for l in text.splitlines())
-                                else "texte VLM")
+                                else "table VLM" if has_md_table(text) else "texte VLM")
+                    if vlm_reads_numbers(d.label, text):
+                        d.lecture = lecture_text("vlm")
                 if i % 10 == 0:
                     vlm.save_cache()
                     log.info("    VLM : %d/%d images", i, len(to_vlm))
@@ -1281,7 +1313,7 @@ class SkipTextSerializer(MarkdownTextSerializer):
 
 
 def doc_to_markdown(doc: DoclingDocument, decisions: dict[str, PicDecision],
-                    tables: dict[str, tuple[int, str]] | None = None,
+                    tables: dict[str, tuple[int, str, str]] | None = None,
                     charts: dict[str, str] | None = None) -> str:
     pic_ser = SubstitutePictureSerializer()
     pic_ser.decisions = decisions
@@ -1298,7 +1330,7 @@ def doc_to_markdown(doc: DoclingDocument, decisions: dict[str, PicDecision],
     extra: dict[str, Any] = {}
     if (tables or charts) and MarkdownTableSerializer is not None:
         tab_ser = SubstituteTableSerializer()
-        tab_ser.replacements = {ref: md for ref, (_pg, md) in (tables or {}).items()}
+        tab_ser.replacements = {ref: md for ref, (_pg, md, _src) in (tables or {}).items()}
         tab_ser.replacements.update(charts or {})
         extra["table_serializer"] = tab_ser
     ser = MarkdownDocSerializer(doc=doc, picture_serializer=pic_ser, text_serializer=txt_ser,
@@ -1550,8 +1582,10 @@ def process_pdf(pdf: Path, out_dir: Path, pool: ConverterPool,
             md_parts.append(doc_to_markdown(doc, decisions, tables, vtabs))
         rep.vector_tables += len(vtabs)
         rep.warnings.extend(table_warnings(doc, set(tables) | set(vtabs)))
-        rep.warnings.extend(f"p. {pg} : tableau irrégulier corrigé automatiquement"
-                            for pg, _md in tables.values())
+        rep.warnings.extend(
+            f"p. {pg} : tableau irrégulier corrigé sans modèle" if src == "regle"
+            else f"p. {pg} : tableau irrégulier relu par le modèle vision (valeurs non vérifiées)"
+            for pg, _md, src in tables.values())
         if args.dump_debug:
             dump_debug(doc, decisions, debug_dir, stem, start, end)
         del res, doc

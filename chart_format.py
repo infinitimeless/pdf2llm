@@ -10,13 +10,15 @@ Un graphique devient :
     Légende : <libellés de légende non repris dans les tableaux>
     Source : <source>
     Annotations : <valeurs mises en avant hors tableau>
+    Lecture : <provenance des chiffres, seulement s'ils sont lus par un modèle>
 
     | tableau 1 : un seul jeu de données homogène |
 
     | tableau 2 : autre jeu (autre groupe, rappels historiques...) |
 
 Seuls les champs trouvés sont écrits. Les métadonnées viennent de la couche texte du PDF
-(jamais d'un modèle) : `split_meta` reconnaît « Question : », « Base : », « (base: ...) »
+(jamais d'un modèle). « Lecture » est absente pour une lecture exacte (géométrie du PDF) :
+elle signale au LLM des chiffres lus par un modèle, non vérifiés : `split_meta` reconnaît « Question : », « Base : », « (base: ...) »
 et « Source : ».
 """
 
@@ -88,6 +90,7 @@ class ChartMeta:
     legend: list[str] = field(default_factory=list)
     source: str = ""
     notes: list[str] = field(default_factory=list)
+    lecture: str = ""             # provenance des chiffres (vide = lecture exacte)
 
     def _known(self) -> set[str]:
         return {norm(x) for x in [*self.title, self.question, self.base, *self.legend,
@@ -129,6 +132,8 @@ class ChartMeta:
             out.append("Source : " + self.source)
         if self.notes:
             out.append("Annotations : " + " ; ".join(self.notes))
+        if self.lecture:
+            out.append("Lecture : " + self.lecture)
         return out
 
 

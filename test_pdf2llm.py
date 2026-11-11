@@ -546,6 +546,67 @@ def test_fixture_lecture_vectorielle_du_vrai_pdf():
 
 
 # --------------------------------------------------------------------------------------
+# v9 Phase 2 : provenance, scans, cohérence, double lecture
+# --------------------------------------------------------------------------------------
+def _fake_pic(ref, page=1):
+    return NS(self_ref=ref, prov=[NS(page_no=page, bbox=NS(l=0, t=100, r=100, b=0))])
+
+
+def test_v9_t3_ligne_lecture_selon_la_source():
+    tab = "| Libellé | % |\n|---|---|\n| Oui | 23% |"
+    doc = NS(texts=[])
+    pics = [_fake_pic(f"#/pictures/{i}") for i in range(5)]
+    ds = {
+        pics[0].self_ref: p.PicDecision(action="vector", text=tab, body=tab, page=1),
+        pics[1].self_ref: p.PicDecision(action="chart_table", text=tab, page=1,
+                                        lecture=p.lecture_text("granite")),
+        pics[2].self_ref: p.PicDecision(action="vlm", text=tab, page=1, label="bar_chart",
+                                        lecture=p.lecture_text("vlm")),
+        pics[3].self_ref: p.PicDecision(action="text_layer", text="*Données lues…*", page=1),
+        pics[4].self_ref: p.PicDecision(action="vlm", text="```mermaid\nflowchart TD\n```",
+                                        page=1, label="flow_chart"),
+    }
+    p.build_chart_blocks(doc, pics, ds)
+    out = [ds[x.self_ref].text for x in pics]
+    assert "Lecture" not in out[0] and out[0] == tab              # exact : pas de ligne
+    assert out[1] == "Lecture : modèle (Granite Vision), valeurs non vérifiées\n\n" + tab
+    assert out[2] == "Lecture : modèle vision, valeurs non vérifiées\n\n" + tab
+    assert "Lecture" not in out[3] and "Lecture" not in out[4]
+    # la ligne vient en DERNIER parmi les métadonnées
+    from chart_format import ChartMeta
+    m = ChartMeta(title=["T"], source="Ifop", lecture="modèle vision, valeurs non vérifiées")
+    assert m.lines()[-1].startswith("Lecture : ")
+    # règle du modèle vision : tableau ou texte chiffré d'un graphique, pas une photo
+    assert p.vlm_reads_numbers("photograph", tab)
+    assert p.vlm_reads_numbers("bar_chart", "Valeurs : 12 % et 30 %")
+    assert not p.vlm_reads_numbers("photograph", "Trois personnes devant 2 maisons.")
+    assert not p.vlm_reads_numbers("bar_chart", "```mermaid\nflowchart TD\n A-->B\n```")
+
+
+def test_v9_t3_tableaux_irreguliers_regle_ou_vlm():
+    from PIL import Image
+    grid = [["Libellé", "A", "B"], ["x", "1", "2"], ["y", "3", ""], ["z", "4 000 5,1", ""]]
+    it = NS(self_ref="#/tables/0", prov=[NS(page_no=3)],
+            data=NS(grid=[[NS(text=c) for c in r] for r in grid], num_rows=4),
+            get_image=lambda doc: Image.new("RGB", (40, 40)))
+    vlm = NS(ask=lambda img, label, mode, hint="": "| Libellé | A | B |\n|---|---|---|\n"
+             "| x | 1 | 2 |\n| y | 3 | 9 |\n| z | 4 | 5 |")
+    args = NS(no_table_fallback=False)
+    orig = p.irregular_tables
+    p.irregular_tables = lambda doc: [it]
+    try:
+        out = p.decide_tables(None, args, vlm, {3: {"1", "2", "3", "4", "5", "9"}})
+        page, md, src = out["#/tables/0"]
+        assert (page, src) == (3, "vlm") and md.startswith(
+            "Lecture : modèle vision, valeurs non vérifiées\n\n| Libellé |"), md
+        it.data.grid = [[NS(text=c) for c in r] for r in RAW_MARGIN_GRID]
+        _pg, md, src = p.decide_tables(None, args, vlm, {})["#/tables/0"]
+        assert src == "regle" and "Lecture" not in md
+    finally:
+        p.irregular_tables = orig
+
+
+# --------------------------------------------------------------------------------------
 # Golden : sortie complète comparée à une version validée (tools/golden.py)
 # --------------------------------------------------------------------------------------
 def _golden():
