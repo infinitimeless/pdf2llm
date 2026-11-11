@@ -196,6 +196,7 @@ def test_vector_barres_avec_intertitres_et_texte_masque():
     assert "| Âge | Valeur |\n|---|---|\n| 18-24 ans | 36% |" in res.text, res.text
     assert "Groupe" not in res.text
     assert "99" not in res.text
+    assert not hasattr(doc.page(1), "px")          # rendu libéré après l'analyse (v9, T7)
 
 
 def test_vector_secteurs_rattaches_par_la_legende():

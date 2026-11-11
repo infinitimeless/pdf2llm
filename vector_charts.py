@@ -141,10 +141,14 @@ class VectorPage:
         self.scale = 2
         img = page.render(scale=self.scale).to_pil().convert("RGB")
         self.px = np.asarray(img).astype(np.int16)
-        self.words = self._words(page)
+        del img
+        self.words = self._words(page)          # visibilité des mots : _ink (rendu)
         self.lines = self._lines(self.words)
-        self.shapes = self._shapes(page)
+        self.shapes = self._shapes(page)        # visibilité des formes : _shows_color
         self.legend, self.swatches = self._legend()
+        # Toute la visibilité est calculée : le rendu (≈ 12 Mo par slide 16:9 en int16)
+        # n'est plus lu. On le libère, sinon il reste en mémoire pour chaque page du PDF.
+        del self.px
 
     # -- rendu : le texte et les formes sont-ils réellement visibles ? -----------------
     def _crop(self, b: Box) -> np.ndarray:
