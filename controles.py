@@ -26,6 +26,10 @@ SUM_TOL = 2.0
 _TOTAL = re.compile(r"^\s*\**\s*total\b", re.I)
 _NUM = re.compile(r"^[-+−]?\d[\d   ]*(?:[.,]\d+)?\s*(?:%|pts?|points?)?$")
 _DASH = {"–", "-", "—", ""}
+# Colonne d'une vague antérieure (« Oct. 2021 », « Rappel 2025 », « vague 3 ») : jamais une
+# partie d'un total (« Total » y désigne souvent le total des citations, réponses multiples)
+_HISTORY = re.compile(r"rappel|\b(?:19|20)\d{2}\b|vague|évol|evol|écart|ecart|\bvs\b"
+                      r"|précédent|precedent", re.I)
 
 
 def num(cell: str) -> float | None:
@@ -100,7 +104,8 @@ def controles_coherence(rows: list[list[str]], kind_hint: str = "",
     for j in total_cols:
         for r in body:
             tv = num(r[j])
-            sib = [num(r[k]) for k in range(1, ncol) if k not in total_cols]
+            sib = [num(r[k]) for k in range(1, ncol)
+                   if k not in total_cols and not _HISTORY.search(head[k])]
             if tv is None or sum(v is not None for v in sib) < 2:
                 continue
             if not _runs_match(sib, tv, TOTAL_TOL):

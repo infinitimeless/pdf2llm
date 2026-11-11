@@ -191,7 +191,8 @@ def _row_index(rows: list[list[str]]) -> dict[str, list[list[float]]]:
     ne gêne pas le rapprochement."""
     out: dict[str, list[list[float]]] = {}
     for r in rows[1:]:
-        k = next((i for i, c in enumerate(r) if cell_num(c) is not None), len(r))
+        # la première cellule est toujours un libellé, même numérique (année)
+        k = next((i for i, c in enumerate(r) if i and cell_num(c) is not None), len(r))
         labels = [c for c in r[:k] if c.strip()]
         if not labels:
             continue
@@ -1276,6 +1277,10 @@ def apply_cross_check(doc: DoclingDocument, pic: PictureItem, d: PicDecision,
         return
     # chaque tableau du VLM a son en-tête : on les écarte, une ligne d'en-tête factice
     v_rows = [["en-tête"]] + [r for t in tables for r in t[1:]]
+    if not any(any(vals) for vals_list in _row_index(v_rows).values() for vals in vals_list):
+        # tableau du VLM inexploitable (en-tête seul...) : ce n'est pas un désaccord
+        d.note = (d.note + " ; " if d.note else "") + "double lecture impossible (VLM)"
+        return
     ok, detail = compare_readings(g_rows, v_rows)
     if ok:
         d.lecture = lecture_text("2", scan)

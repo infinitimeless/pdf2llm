@@ -653,6 +653,9 @@ def test_v9_t5_controles_de_coherence():
     # « Peu » et « Pas » permutés : plus aucune suite contiguë ne fait 19
     swapped = [ifop[0][:6], ["Regarder", "7%", "4%", "81%", "8%", "19%"]]
     assert cc(swapped, "empilees", 4) == ["total incohérent (« Regarder » : Total Oui = 19)"]
+    # « Total » des citations (réponses multiples) à côté de vagues antérieures : pas un total
+    waves = [["Émotion", "Total", "May 2024", "Oct. 2021"], ["Inquiétude", "59", "48", "38"]]
+    assert cc(waves, "") == []
     # barres de profil : jamais de somme à 100
     assert cc([["Sexe", "Valeur"], ["Hommes", "52%"], ["Femmes", "34%"]], "") == []
     # intégration : auto-test vectoriel et étiquette « Lecture »
@@ -698,6 +701,14 @@ def test_v9_t6_double_lecture_granite_vlm():
     assert d.action == "image" and not d.lecture and d.warning.startswith(p.CROSS_DISAGREE)
     assert d.text == ("*Valeurs lues sans rattachement établi (Granite et modèle vision en "
                       "désaccord) : 57%*"), d.text
+    # libellés numériques (années) : rapprochés eux aussi
+    years = [["Année", "%"], ["2020", "30"], ["2021", "35"]]
+    assert p.compare_readings(years, [["h"], ["2020", "30"], ["2021", "35"]])[0]
+    assert not p.compare_readings(years, [["h"], ["2020", "35"], ["2021", "30"]])[0]
+    # tableau du VLM réduit à une ligne d'en-tête : double lecture impossible, Granite gardé
+    d = p.PicDecision(action="chart_table", text="x", lecture=p.lecture_text("granite"))
+    p.apply_cross_check(doc, pic, d, g, "**Brand**\n| 68 | 72 | 94 |")
+    assert d.action == "chart_table" and "impossible" in d.note
     # VLM muet : on garde Granite tel quel
     d = p.PicDecision(action="chart_table", text="x", lecture=p.lecture_text("granite"))
     p.apply_cross_check(doc, pic, d, g, None)
