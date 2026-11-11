@@ -370,6 +370,7 @@ class ChartResult:
     values: int        # nombre de valeurs lues
     meta: ChartMeta = field(default_factory=ChartMeta)
     body: str = ""     # tableaux seuls
+    series: list[str] = field(default_factory=list)   # séries d'une barre empilée (légende)
 
 # En-tête d'une colonne sans barre qui est un rappel d'une vague antérieure : ces valeurs
 # vont dans un tableau à part (« un jeu de données homogène par tableau »).
@@ -785,7 +786,7 @@ def read_region(pg: VectorPage, l: float, b: float, r: float, t: float,
     meta.add_texts(titles)
     body = "\n\n".join(blocks)
     return ChartResult(text=render(meta, body), kind=" + ".join(kinds), values=len(values),
-                       meta=meta, body=body)
+                       meta=meta, body=body, series=list(stacked) if rows else [])
 
 
 def c_is_history(head: str) -> bool:

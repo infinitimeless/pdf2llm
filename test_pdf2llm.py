@@ -631,6 +631,37 @@ def test_v9_t4_pdf_sans_couche_texte():
     assert args.scan_charts == "tag"
 
 
+def test_v9_t5_controles_de_coherence():
+    from controles import controles_coherence as cc, md_tables, num
+    assert num("52%") == 52 and num("1,8") == 1.8 and num("–") is None and num("<1") is None
+    # Ifop p. 9 : anneau 2 / 11 / 34 / 53 et « Total Proche » = 2 + 11
+    ring = [["Libellé", "Valeur"], ["Très proche", "2%"], ["Plutôt proche", "11%"],
+            ["Plutôt éloigné", "34%"], ["Très éloigné", "53%"], ["Total Proche", "13%"]]
+    assert cc(ring, "secteurs") == []
+    assert cc([r if r[0] != "Total Proche" else ["Total Proche", "15%"] for r in ring],
+              "secteurs") == ["total incohérent (Total Proche = 15)"]
+    # barres empilées : 97 sur 6 segments passe (arrondis), 90 est signalé
+    head = ["Libellé", "A", "B", "C", "D", "E", "F"]
+    assert cc([head, ["x", "10", "20", "30", "17", "10", "10"]], "empilees") == []
+    assert cc([["Libellé", "A", "B", "C"], ["y", "30", "30", "30"]], "empilees") == \
+        ["somme ≠ 100 (« y » : 90)"]
+    # colonne « Total Oui » = somme d'une suite contiguë ; « Ensemble » à droite ignorée
+    ifop = [["Libellé", "Très", "Assez", "Peu", "Pas", "Total Oui", "Ensemble"],
+            ["Regarder", "7%", "4%", "8%", "81%", "19%", "8%"]]
+    assert cc(ifop, "empilees") == [] and cc(ifop, "empilees", 4) == []
+    # « Peu » et « Pas » permutés : plus aucune suite contiguë ne fait 19
+    swapped = [ifop[0][:6], ["Regarder", "7%", "4%", "81%", "8%", "19%"]]
+    assert cc(swapped, "empilees", 4) == ["total incohérent (« Regarder » : Total Oui = 19)"]
+    # barres de profil : jamais de somme à 100
+    assert cc([["Sexe", "Valeur"], ["Hommes", "52%"], ["Femmes", "34%"]], "") == []
+    # intégration : auto-test vectoriel et étiquette « Lecture »
+    body = "| Libellé | Valeur |\n|---|---|\n| Non | 57% |\n| Oui | 23% |"
+    assert p.vector_checks(body, "secteurs", []) == ["somme ≠ 100 (secteurs : 80)"]
+    assert p.vector_checks(body, "barres", []) == []
+    assert md_tables(body)[0][1] == ["Non", "57%"]
+    assert p.model_checks(body, "pie_chart") and not p.model_checks(body, "bar_chart")
+
+
 # --------------------------------------------------------------------------------------
 # Golden : sortie complète comparée à une version validée (tools/golden.py)
 # --------------------------------------------------------------------------------------

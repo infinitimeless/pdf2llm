@@ -78,6 +78,7 @@ except ImportError:  # pragma: no cover
     VectorDocument = None  # type: ignore[assignment,misc]
 
 from chart_format import ChartMeta, render as render_chart, split_meta, looks_like_question
+from controles import controles_coherence, md_tables, short_tags
 
 log = logging.getLogger("pdf2llm")
 
@@ -149,6 +150,7 @@ READERS = {
 }
 
 
+VECTOR_CHECK = "incohérence dans une lecture vectorielle (défaut du lecteur, à signaler)"
 SCAN_BANNER = "> PDF sans couche texte (scan ou capture) : chiffres lus par un modèle, non vérifiés."
 SCAN_UNREAD = "*Graphique non lu (PDF sans couche texte)*"
 
@@ -171,6 +173,32 @@ def vlm_reads_numbers(label: str, text: str) -> bool:
     if not text or text.startswith("```mermaid"):
         return False
     return has_md_table(text) or (label in TABLE_MODE_LABELS and bool(re.search(r"\d", text)))
+
+
+def model_checks(text: str, label: str) -> list[str]:
+    """Contrôles de cohérence (controles.py) des tableaux lus par un modèle. La somme à 100
+    n'est appliquée qu'aux camemberts et aux barres empilées (classe du classifieur)."""
+    hint = {"pie_chart": "secteurs", "stacked_bar_chart": "empilees"}.get(label, "")
+    out: list[str] = []
+    for rows in md_tables(text):
+        out += controles_coherence(rows, hint)
+    return list(dict.fromkeys(out))
+
+
+def vector_checks(body: str, kind: str, series: list[str]) -> list[str]:
+    """Auto-test d'une lecture vectorielle : exacte par construction, elle doit toujours
+    passer les contrôles. Tableau des secteurs : premier tableau « Libellé | Valeur » ;
+    barres empilées : tableaux dont les colonnes suivent les séries de la légende."""
+    out: list[str] = []
+    for i, rows in enumerate(md_tables(body)):
+        head = rows[0]
+        if series and head[1:1 + len(series)] == series:
+            out += controles_coherence(rows, "empilees", len(series))
+        elif i == 0 and "secteurs" in kind and head == ["Libellé", "Valeur"]:
+            out += controles_coherence(rows, "secteurs")
+        else:
+            out += controles_coherence(rows, "")
+    return list(dict.fromkeys(out))
 
 
 # --------------------------------------------------------------------------------------
@@ -563,7 +591,8 @@ def fixed_table_md(grid: list[list[str]]) -> str | None:
     return f"**{title}**\n\n{md}" if title else md
 
 
-def vector_tables(doc: DoclingDocument, vec: "VectorDocument | None") -> dict[str, str]:
+def vector_tables(doc: DoclingDocument, vec: "VectorDocument | None",
+                  warnings: list[str] | None = None) -> dict[str, str]:
     """« Tableaux » de Docling qui sont en fait des graphiques vectoriels (barres empilées
     d'Ipsos lues comme une grille, colonnes décalées) : relus par la géométrie du PDF.
     Retenu seulement si TOUS les nombres de la zone sont rattachés à une barre ou à une
@@ -582,6 +611,9 @@ def vector_tables(doc: DoclingDocument, vec: "VectorDocument | None") -> dict[st
             log.debug("lecture vectorielle du tableau impossible : %s", e)
         if res is not None and res.kind:
             out[it.self_ref] = res.text
+            for prob in vector_checks(res.body, res.kind, res.series):
+                if warnings is not None:
+                    warnings.append(f"p. {it.prov[0].page_no} : {VECTOR_CHECK} : {prob}")
             log.info("    p.%s : tableau Docling remplacé par le graphique vectoriel (%s)",
                      it.prov[0].page_no, res.kind)
     return out
@@ -839,6 +871,7 @@ class PicDecision:
     body: str = ""                # tableaux seuls, sans les métadonnées
     meta_refs: list[str] = field(default_factory=list)  # textes du PDF repris dans `meta`
     lecture: str = ""             # provenance des chiffres lus par un modèle (« Lecture : »)
+    coherence: list[str] = field(default_factory=list)  # contrôles arithmétiques en échec
 
 
 @dataclass
@@ -1032,6 +1065,7 @@ def unread_scan_charts(decisions: dict[str, PicDecision]) -> int:
     for d in decisions.values():
         if d.lecture:
             d.action, d.text, d.body, d.meta, d.lecture = "image", SCAN_UNREAD, "", None, ""
+            d.coherence = []
             d.reason = "PDF sans couche texte : chiffres du modèle non écrits"
             n += 1
     return n
@@ -1137,6 +1171,9 @@ def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClie
                 d.action, d.text = "vector", res.text
                 d.meta, d.body = res.meta, res.body
                 d.reason = f"graphique vectoriel lu dans le PDF ({res.kind})"
+                d.coherence = vector_checks(res.body, res.kind, res.series)
+                if d.coherence:          # sortie inchangée : seulement signalé
+                    d.note = "auto-test vectoriel en échec : " + " ; ".join(d.coherence)
                 continue
             if label in CHART_LABELS:
                 d.note = f"lecture vectorielle impossible : {vec.last_reason}"
@@ -1268,6 +1305,15 @@ def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClie
                     log.info("    VLM : %d/%d images", i, len(to_vlm))
         vlm.save_cache()
         chrono.add("vlm", time.perf_counter() - t_vlm)
+
+    # Contrôles de cohérence des chiffres lus par un modèle : signalés, jamais rejetés (v9)
+    for d in decisions.values():
+        if d.lecture and d.text:
+            d.coherence = model_checks(d.text, d.label)
+            if d.coherence:
+                d.note = (d.note + " ; " if d.note else "") + "incohérence : " + \
+                    " ; ".join(d.coherence)
+                d.lecture += " ; " + short_tags(d.coherence)
 
     # PDF sans couche texte avec --scan-charts image : rien de ce qu'un modèle a lu en
     # chiffres n'est écrit ; l'image est gardée en WebP
@@ -1610,8 +1656,12 @@ def process_pdf(pdf: Path, out_dir: Path, pool: ConverterPool,
                                     chrono, scan)
         img_count += sum(1 for d in decisions.values() if d.image_rel)
         all_decisions.extend(decisions.values())
+        for d in decisions.values():
+            for prob in d.coherence:
+                rep.warnings.append(f"p. {d.page} : {VECTOR_CHECK} : {prob}" if d.action == "vector"
+                                    else f"p. {d.page} : incohérence {prob}")
         with chrono("vectoriel"):
-            vtabs = vector_tables(doc, vec)
+            vtabs = vector_tables(doc, vec, rep.warnings)
         with chrono("tableaux"):     # y compris les relectures de tableaux par le VLM
             tables = decide_tables(doc, args, vlm, page_numbers(doc), set(vtabs), scan)
         with chrono("serialisation"):
