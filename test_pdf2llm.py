@@ -606,6 +606,31 @@ def test_v9_t3_tableaux_irreguliers_regle_ou_vlm():
         p.irregular_tables = orig
 
 
+def test_v9_t4_pdf_sans_couche_texte():
+    from PIL import Image, ImageDraw
+    _, tmp = _vec()
+    img = Image.new("RGB", (1200, 800), "white")
+    ImageDraw.Draw(img).rectangle((100, 100, 500, 300), fill=(30, 90, 90))
+    path = tmp / "capture.pdf"
+    img.save(path, "PDF", resolution=100)            # une seule image, aucun texte
+    prof = p.profile_pages(path, 1, 1)
+    assert prof[0].chars == 0 and prof[0].img_area > 0.9
+    assert p.pdf_kind(prof) == "scan"
+    assert p.lecture_text("vlm", scan=True) == \
+        "modèle vision, PDF sans couche texte, chiffres invérifiables"
+    assert p.lecture_text("granite") == "modèle (Granite Vision), valeurs non vérifiées"
+    # --scan-charts image : chiffres du modèle non écrits, image conservée
+    tab = "| Libellé | % |\n|---|---|\n| Oui | 23% |"
+    ds = {"a": p.PicDecision(action="vlm", text=tab, lecture=p.lecture_text("vlm", True)),
+          "b": p.PicDecision(action="vlm", text="Une photo.", label="photograph")}
+    assert p.unread_scan_charts(ds) == 1
+    assert ds["a"].action == "image" and ds["a"].text == p.SCAN_UNREAD and not ds["a"].lecture
+    assert ds["b"].text == "Une photo."
+    assert p.SCAN_BANNER.startswith("> PDF sans couche texte")
+    args = p.build_parser().parse_args(["a.pdf", "out"])
+    assert args.scan_charts == "tag"
+
+
 # --------------------------------------------------------------------------------------
 # Golden : sortie complète comparée à une version validée (tools/golden.py)
 # --------------------------------------------------------------------------------------

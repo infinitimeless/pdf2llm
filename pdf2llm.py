@@ -149,8 +149,15 @@ READERS = {
 }
 
 
-def lecture_text(reader: str) -> str:
-    """« Lecture : » d'un graphique ou d'un tableau dont les chiffres viennent d'un modèle."""
+SCAN_BANNER = "> PDF sans couche texte (scan ou capture) : chiffres lus par un modèle, non vérifiés."
+SCAN_UNREAD = "*Graphique non lu (PDF sans couche texte)*"
+
+
+def lecture_text(reader: str, scan: bool = False) -> str:
+    """« Lecture : » d'un graphique ou d'un tableau dont les chiffres viennent d'un modèle.
+    PDF sans couche texte (scan) : aucun contrôle n'a pu vérifier ces chiffres."""
+    if scan:
+        return f"{READERS[reader]}, PDF sans couche texte, chiffres invérifiables"
     return f"{READERS[reader]}, valeurs non vérifiées"
 
 
@@ -582,11 +589,13 @@ def vector_tables(doc: DoclingDocument, vec: "VectorDocument | None") -> dict[st
 
 def decide_tables(doc: DoclingDocument, args: argparse.Namespace, vlm: "VlmClient | None",
                   pnums: dict[int, set[str]],
-                  skip: set[str] | None = None) -> dict[str, tuple[int, str, str]]:
+                  skip: set[str] | None = None,
+                  scan: bool = False) -> dict[str, tuple[int, str, str]]:
     """Tableaux à grille irrégulière : 1) correctif déterministe si le motif est reconnu ;
     2) sinon relecture de l'image par le VLM, retenue seulement si elle a au moins autant de
     lignes (à 2 près) et si ses nombres figurent dans la couche texte de la page ;
-    3) sinon on garde la version de Docling. `skip` : déjà lus en vectoriel.
+    3) sinon on garde la version de Docling. `skip` : déjà lus en vectoriel. `scan` : PDF
+    sans couche texte (avec --scan-charts image, pas de relecture par le modèle).
     Renvoie {ref: (page, markdown, source)}, source = "regle" (sans modèle) ou "vlm"."""
     out: dict[str, tuple[int, str, str]] = {}
     for it in irregular_tables(doc):
@@ -602,6 +611,8 @@ def decide_tables(doc: DoclingDocument, args: argparse.Namespace, vlm: "VlmClien
                 continue
             if vlm is None or args.no_table_fallback:
                 continue
+            if scan and getattr(args, "scan_charts", "tag") == "image":
+                continue
             img = it.get_image(doc)
             if img is None:
                 continue
@@ -615,7 +626,8 @@ def decide_tables(doc: DoclingDocument, args: argparse.Namespace, vlm: "VlmClien
             if invented_values(text, pnums.get(page, set()), 0.1):
                 log.info("    p.%s : tableau irrégulier, relecture VLM douteuse -> Docling", page)
                 continue
-            out[it.self_ref] = (page, "Lecture : " + lecture_text("vlm") + "\n\n" + text, "vlm")
+            out[it.self_ref] = (page, "Lecture : " + lecture_text("vlm", scan) + "\n\n" + text,
+                                 "vlm")
             log.info("    p.%s : tableau irrégulier remplacé par la relecture du VLM", page)
         except Exception as e:  # noqa: BLE001
             log.warning("Correction de tableau impossible : %s", e)
@@ -1013,6 +1025,18 @@ def build_chart_blocks(doc: DoclingDocument, pics: list[PictureItem],
             d.text = render_chart(d.meta, d.body)
 
 
+def unread_scan_charts(decisions: dict[str, PicDecision]) -> int:
+    """--scan-charts image : les chiffres lus par un modèle sur un PDF sans couche texte ne
+    sont pas écrits ; le graphique devient une mention et son image est conservée."""
+    n = 0
+    for d in decisions.values():
+        if d.lecture:
+            d.action, d.text, d.body, d.meta, d.lecture = "image", SCAN_UNREAD, "", None, ""
+            d.reason = "PDF sans couche texte : chiffres du modèle non écrits"
+            n += 1
+    return n
+
+
 def table_heads(md: str) -> set[str]:
     """Libellés des tableaux Markdown d'un bloc : en-têtes de colonnes (hors première) et
     libellés de lignes (première colonne ; ex. légende d'un anneau)."""
@@ -1047,11 +1071,13 @@ def strip_labels(text: str, labels: set[str]) -> str:
 def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClient | None,
                     assets_dir: Path, stem: str, img_offset: int,
                     vec: "VectorDocument | None" = None,
-                    granite: Any = None, chrono: Chrono | None = None) -> dict[str, PicDecision]:
+                    granite: Any = None, chrono: Chrono | None = None,
+                    scan: bool = False) -> dict[str, PicDecision]:
     """Décide du sort de chaque image. `vec` : lecture vectorielle (prioritaire).
     `granite(pages) -> {page: [(boîte, tabular_chart)]}` : repli Granite Vision appelé
     une seule fois, pour les pages dont un graphique n'a pas été lu en vectoriel.
-    `chrono` : cumul des durées des étapes vectoriel, granite et vlm."""
+    `chrono` : cumul des durées des étapes vectoriel, granite et vlm. `scan` : PDF sans
+    couche texte (chiffres invérifiables, voir --scan-charts)."""
     chrono = chrono or Chrono()
     pics: list[PictureItem] = [it for it, _ in doc.iterate_items() if isinstance(it, PictureItem)]
     decisions: dict[str, PicDecision] = {}
@@ -1147,7 +1173,7 @@ def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClie
                 prob = chart_rows_problem(rows)
                 if prob is None:
                     d.action, d.reason = "chart_table", "données extraites par Granite Vision"
-                    d.lecture = lecture_text("granite")
+                    d.lecture = lecture_text("granite", scan)
                     d.text = rows_to_md(rows)
                     if getattr(tc, "title", None):
                         d.meta = ChartMeta(title=[tc.title.strip()])
@@ -1156,7 +1182,7 @@ def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClie
                 if tabs and all(chart_rows_problem(t) is None for t in tabs):
                     d.action, d.reason = "chart_table", "données extraites par Granite Vision"
                     d.note = "tableau Granite fusionné, scindé en %d" % len(tabs)
-                    d.lecture = lecture_text("granite")
+                    d.lecture = lecture_text("granite", scan)
                     d.text = "\n\n".join(rows_to_md(t) for t in tabs)
                     continue
                 d.note = (d.note + " ; " if d.note else "") + f"Granite rejeté : {prob}"
@@ -1236,12 +1262,17 @@ def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClie
                     d.reason = ("mermaid" if text.startswith("```mermaid")
                                 else "table VLM" if has_md_table(text) else "texte VLM")
                     if vlm_reads_numbers(d.label, text):
-                        d.lecture = lecture_text("vlm")
+                        d.lecture = lecture_text("vlm", scan)
                 if i % 10 == 0:
                     vlm.save_cache()
                     log.info("    VLM : %d/%d images", i, len(to_vlm))
         vlm.save_cache()
         chrono.add("vlm", time.perf_counter() - t_vlm)
+
+    # PDF sans couche texte avec --scan-charts image : rien de ce qu'un modèle a lu en
+    # chiffres n'est écrit ; l'image est gardée en WebP
+    if scan and getattr(args, "scan_charts", "tag") == "image":
+        unread_scan_charts(decisions)
 
     # Format commun : métadonnées (titre, question, base, source...) puis tableaux
     build_chart_blocks(doc, pics, decisions)
@@ -1549,6 +1580,11 @@ def process_pdf(pdf: Path, out_dir: Path, pool: ConverterPool,
         log.info("  type : %s", rep.kind)
     except Exception as e:  # noqa: BLE001
         log.warning("Triage impossible : %s", e)
+    # PDF sans couche texte : `kind` est calculé sur la plage de pages demandée
+    scan = rep.kind == "scan"
+    if scan:
+        rep.warnings.append("PDF sans couche texte (scan ou capture) : chiffres lus par un "
+                            "modèle, invérifiables")
     vec = None
     if VectorDocument is not None and not args.no_vector:
         try:
@@ -1571,13 +1607,13 @@ def process_pdf(pdf: Path, out_dir: Path, pool: ConverterPool,
             res = converter.convert(pdf, page_range=(start, end))
         doc = res.document
         decisions = decide_pictures(doc, args, vlm, assets_dir, stem, img_count, vec, granite,
-                                    chrono)
+                                    chrono, scan)
         img_count += sum(1 for d in decisions.values() if d.image_rel)
         all_decisions.extend(decisions.values())
         with chrono("vectoriel"):
             vtabs = vector_tables(doc, vec)
         with chrono("tableaux"):     # y compris les relectures de tableaux par le VLM
-            tables = decide_tables(doc, args, vlm, page_numbers(doc), set(vtabs))
+            tables = decide_tables(doc, args, vlm, page_numbers(doc), set(vtabs), scan)
         with chrono("serialisation"):
             md_parts.append(doc_to_markdown(doc, decisions, tables, vtabs))
         rep.vector_tables += len(vtabs)
@@ -1596,6 +1632,8 @@ def process_pdf(pdf: Path, out_dir: Path, pool: ConverterPool,
     md = "\n".join(md_parts)
     if not args.no_denoise:
         md, rep.noise_lines_removed = denoise_markdown(md)
+    if scan:
+        md = SCAN_BANNER + "\n\n" + md
     (out_dir / f"{stem}.md").write_text(md, "utf-8")
     chrono.add("serialisation", time.perf_counter() - t_ser)
 
@@ -1661,6 +1699,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Faire tourner Granite Vision via une API (ex. LM Studio) au lieu d'en local")
     c.add_argument("--chart-api-model", default="granite-vision-4.1-4b")
     c.add_argument("--mlx", action="store_true", help="Mac Apple Silicon : Granite Vision en MLX")
+    c.add_argument("--scan-charts", choices=["tag", "image"], default="tag",
+                   help="PDF sans couche texte (scan, capture) : tag = chiffres lus par un modèle "
+                        "écrits avec la mention « invérifiables » (défaut) ; image = non écrits, "
+                        "image conservée en WebP")
     c.add_argument("--no-vector", action="store_true",
                    help="Ne pas lire les graphiques vectoriels dans la géométrie du PDF "
                         "(tout passe alors par Granite Vision / le modèle vision)")
