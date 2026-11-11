@@ -1,44 +1,44 @@
-# pdf2llm : vos PDF en Markdown léger pour LLM
+# pdf2llm: your PDFs as lightweight Markdown for LLMs
 
-Convertit un PDF, ou un dossier entier de PDF, en Markdown compact et fidèle, destiné à un LLM **texte seul** (non multimodal). Chaque élément visuel est remplacé par une donnée lisible : un graphique devient un tableau de valeurs, un schéma devient du Mermaid, une photo devient une description.
+Converts one PDF, or a whole folder of PDFs, into compact and faithful Markdown for a **text-only** (non-multimodal) LLM. Every visual element is replaced by readable data: a chart becomes a table of values, a diagram becomes Mermaid, a photo becomes a description.
 
-Priorité : **exactitude des chiffres**, puis faible nombre de tokens. Une donnée absente vaut mieux qu'une donnée fausse.
+Priority: **exact numbers** first, then a low token count, then speed. Missing data is better than wrong data.
 
-Tout tourne en local : [Docling](https://github.com/docling-project/docling) (mise en page, tableaux, OCR, classement des images, Granite Vision pour les graphiques), plus un modèle vision servi par LM Studio ou Ollama.
+Everything runs locally: [Docling](https://github.com/docling-project/docling) (layout, tables, OCR, picture classification, Granite Vision for charts), plus a vision model served by LM Studio or Ollama.
 
-## Ce que devient chaque image
+The code, log messages and reports are in French (the tool was built for French survey decks); this README is in English.
 
-| Type d'image (classé par Docling) | Ce qu'elle devient |
+## What happens to each picture
+
+| Picture type (classified by Docling) | What it becomes |
 |---|---|
-| **Graphique vectoriel** (slides exportées de PowerPoint : barres, barres empilées, secteurs, anneaux) | Tableau **exact** lu dans la géométrie du PDF, sans modèle (`vector_charts.py`) : valeurs, libellés, légende, intertitres de groupe, colonnes « Total » |
-| Graphique de données non vectoriel, ou non compris en entier par la lecture vectorielle | Tableau de valeurs (Granite Vision, intégré à Docling), contrôlé puis repris par le modèle vision si suspect |
-| Camembert / anneau mal lu par Granite | Valeurs et légende tirées de la couche texte du PDF, **sans** rattachement inventé |
-| Schéma, organigramme, flux, architecture | Bloc Mermaid (modèle vision de LM Studio) |
-| Photo, capture d'écran, carte, plan | Description texte, plus un WebP compressé (1024 px max, lien local) |
-| Logo, icône, signature, tampon, QR code, image répétée, miniature | Supprimée (la légende est conservée) |
-| Image que le modèle vision juge décorative | Supprimée |
+| **Vector chart** (slides exported from PowerPoint: bars, stacked bars, pies, donuts) | An **exact** table read from the PDF geometry, with no model (`vector_charts.py`): values, labels, legend, group headings, "Total" columns |
+| Data chart that is not vector, or that the vector reader does not fully understand | Table of values (Granite Vision, built into Docling), checked, cross-checked by the vision model, and handed over to the vision model if suspect |
+| Pie / donut misread by Granite | Values and legend taken from the PDF text layer, **without** inventing which value goes with which label |
+| Diagram, org chart, flow, architecture | Mermaid block (vision model in LM Studio) |
+| Photo, screenshot, map, plan | Text description, plus a compressed WebP (1024 px max, local link) |
+| Logo, icon, signature, stamp, QR code, repeated image, thumbnail | Removed (the caption is kept) |
+| Picture the vision model calls decorative | Removed |
 
-### Lecture vectorielle des graphiques
+### Vector reading of charts
 
-Dans une présentation exportée en PDF, un graphique n'est pas une image : les barres et les secteurs sont des formes de couleur, et chaque valeur est du texte du PDF. `vector_charts.py` reconstruit le tableau par la géométrie :
+In a presentation exported to PDF, a chart is not an image: bars and slices are coloured shapes, and every value is PDF text. `vector_charts.py` rebuilds the table from the geometry:
 
-- **secteurs et segments empilés** : la valeur est dans une forme de couleur C ; le carré de légende de couleur C donne le libellé ;
-- **barres simples** : la valeur est à côté de la barre (à droite ou au-dessus), le libellé sur la même ligne ; chaque intertitre (« Sexe », « Âge »…) donne **son propre tableau**, dont il devient l'en-tête de première colonne ;
-- **colonnes sans barre** (« Total Oui », « Ensemble des Français ») : rattachées à la ligne, avec leur en-tête ; une colonne de **rappel** (« Rappel 2022 », année, « vague », « évolution ») part dans un tableau à part ;
-- libellés de **légende** qui ne figurent dans aucun tableau : repris dans la ligne « Légende » ;
-- le **texte invisible** (recouvert par une forme, oublié dans la slide) est écarté grâce au rendu de la page ;
-- un graphique que Docling prend pour un **tableau** (barres empilées d'Ipsos lues comme une grille, colonnes décalées) est relu de la même façon ; le tableau de Docling n'est remplacé que si la lecture réussit (`vector_tables`) ;
-- des années seules au-dessus de colonnes sans barre (« 2024 2020 2017 » d'un bloc « Rappels ») sont des en-têtes : ces colonnes forment le tableau des rappels.
-- un **chiffre-clé** en très grand corps (« % Trop » / « 30 ») devient l'annotation « % Trop : 30 », et sa liste « RAPPELS 2020 : 30% … » un petit tableau Année / valeur ;
-- les encadrés (à puces, ou lignes commençant par « 19% chez … ») donnent une annotation par entrée ; un fond d'encadré pâle n'est pas une barre.
+- **slices and stacked segments**: the value sits inside a shape of colour C; the legend swatch of colour C gives the label;
+- **simple bars**: the value sits next to the bar (right of it or above it), the label on the same line; each group heading ("Sexe", "Âge"…) gets **its own table** and becomes the header of its first column;
+- **columns without bars** ("Total Oui", "Ensemble des Français") are attached to their row, with their header; a **recall** column ("Rappel 2022", a year, "vague", "évolution") goes into a separate table;
+- **legend** labels that appear in no table are kept in the "Légende" line;
+- **invisible text** (covered by a shape, forgotten in the slide) is ignored, thanks to a render of the page;
+- a chart that Docling takes for a **table** (Ipsos stacked bars read as a grid, shifted columns) is re-read the same way; Docling's table is replaced only if the reading succeeds (`vector_tables`);
+- bare years above columns without bars ("2024 2020 2017" of a "Rappels" block) are headers: those columns form the recall table;
+- a **key figure** in a very large font ("% Trop" / "30") becomes the annotation "% Trop : 30", and its "RAPPELS 2020 : 30% …" list becomes a small Year / value table;
+- callout boxes (bullets, or lines starting with "19% chez …") give one annotation per entry; a pale callout background is not a bar.
 
-**PDF sans couche texte** (capture d'écran, scan, « Exporter en PDF » d'une image : le rapport indique `kind: scan`) : aucune lecture exacte n'est possible, tout passe par le modèle vision et **aucun contrôle ne peut vérifier ses chiffres**. Convertir de préférence le PDF d'origine.
+Safety rule: the table is used only if **every** visible number in the area and every bar is explained. Otherwise the picture takes the usual path below, and the reason is recorded in `_debug/*.pictures.json`. Reading takes a few milliseconds per chart.
 
-Règle de sûreté : le tableau n'est utilisé que si **tous** les nombres visibles de la zone et toutes les barres sont expliqués. Sinon l'image suit le chemin habituel ci-dessous, et la raison est notée dans `_debug/*.pictures.json`. La lecture prend quelques millisecondes par graphique.
+### Common chart format (`chart_format.py`)
 
-### Format commun des graphiques (`chart_format.py`)
-
-Quel que soit le chemin (lecture vectorielle, Granite, couche texte, modèle vision), un graphique chiffré devient un bloc de métadonnées puis un ou plusieurs tableaux, **un jeu de données homogène par tableau** :
+Whatever the path (vector reading, Granite, text layer, vision model), a numeric chart becomes a block of metadata followed by one or more tables, **one homogeneous dataset per table**:
 
 ```
 Titre : Qui connaît Alain Soral ? ; Selon le sexe et l'âge
@@ -47,6 +47,7 @@ Base : ensemble des Français
 Légende : …
 Source : …
 Annotations : Total Oui : 43%
+Lecture : modèle (Granite Vision), valeurs non vérifiées
 
 | Sexe | Valeur |
 |---|---|
@@ -54,159 +55,239 @@ Annotations : Total Oui : 43%
 | Femmes | 34% |
 ```
 
-Seuls les champs trouvés sont écrits. Les métadonnées viennent **de la couche texte du PDF, jamais d'un modèle** : « Question : », « Base : », « (base: …) », « Source : », ou une question non étiquetée suivie d'une base. Question et base vont au premier graphique situé dessous, la source au dernier graphique situé dessus, un texte placé dans la boîte d'une image à cette image ; le texte repris est retiré du flux pour ne pas apparaître deux fois. Une valeur absente s'écrit « – ».
+Only the fields that were found are written. Metadata comes **from the PDF text layer, never from a model**: "Question :", "Base :", "(base: …)", "Source :", or an unlabelled question followed by a base. Question and base go to the first chart below them, the source to the last chart above it, and a text inside a picture's box to that picture; the text is then removed from the main flow so it does not appear twice. A missing value is written "–".
 
-### Triage et repli Granite Vision
+### Where the numbers come from: the `Lecture :` line
 
-- **Triage** : avant la conversion, chaque PDF est profilé en quelques millisecondes (texte par page, images, formes) et classé `texte`, `présentation` ou `scan` (champ `kind` du rapport).
-- **Granite Vision n'est qu'un repli** : la conversion principale ne l'exécute plus. Seules les pages dont un graphique n'a pas été lu en vectoriel sont reconverties avec Granite (champ `granite_pages` du rapport). Un PDF de texte ne charge donc jamais Granite, et les 15 pages de slides de test passent de 167 s à 22 s.
-- **L'OCR reste activé partout** : celui de Docling est sélectif (régions sans texte PDF, pages au texte cassé ou scannées) et ne coûte qu'environ 5 s par PDF. Mesuré sur un rapport de texte pur, le couper ferait perdre des intertitres pourtant présents dans le PDF.
+The downstream LLM only reads the `.md`, so the Markdown says where model-read numbers come from. `Lecture :` is always the **last** metadata line:
 
-### Contrôles qualité
+| Source | `Lecture :` line |
+|---|---|
+| Vector reading (exact) | none: exact is the default, and leaving the line out saves tokens |
+| Granite Vision table | `Lecture : modèle (Granite Vision), valeurs non vérifiées` |
+| Vision model table, or digits in the vision model's text for a chart | `Lecture : modèle vision, valeurs non vérifiées` |
+| Granite and the vision model agree (cross-check) | `Lecture : 2 modèles concordants, valeurs non vérifiées` |
+| Irregular table re-read by the vision model | same line, above the table |
+| PDF without a text layer (scan) | `Lecture : modèle vision, PDF sans couche texte, chiffres invérifiables` |
+| Pie values from the text layer, Mermaid, photo description | none |
 
-Contrôles appliqués aux sorties des modèles (détail dans [debug_note.md](debug_note.md)) :
+When a consistency check fails (see below), its nature is appended: `Lecture : modèle vision, valeurs non vérifiées ; total incohérent`.
 
-- tableau Granite rejeté s'il a des libellés vides, des lignes sans nombre ou une colonne trop souvent vide ; tableau « fusionné » de deux graphiques voisins scindé en deux ;
-- sortie du modèle vision rejetée si plus de la moitié de ses nombres sont absents de la couche texte de la page (valeurs inventées) ;
-- Mermaid rejeté s'il code des chiffres, relance en mode tableau ;
-- aucune phrase d'interprétation ni de « tendance » : en mode tableau, seuls le titre et le tableau sont gardés ;
-- titres et valeurs que Docling « avale » dans l'image repris depuis la couche texte ;
-- tableaux à grille décalée corrigés sans modèle quand le motif est reconnu (tableau Ifop « marges d'erreur »), sinon relus par le modèle vision ;
-- bruit des slides retiré : numéros de page, logo lu par l'OCR.
+### PDFs without a text layer (scans)
 
-## Installation (une fois)
+A screenshot, a scan, or an image "exported to PDF" has no text layer: the report says `kind: scan`. No exact reading is possible, everything goes through a model, and **no check can verify its numbers** (in v8.2 a screenshot PDF produced a false table of past results that nothing flagged). So for a scan:
+
+- the `.md` starts with `> PDF sans couche texte (scan ou capture) : chiffres lus par un modèle, non vérifiés.`;
+- every model-read numeric table is tagged `… PDF sans couche texte, chiffres invérifiables`;
+- the report gets a warning;
+- with `--scan-charts image`, model-read numbers are **not written at all**: the chart becomes `*Graphique non lu (PDF sans couche texte)*` and its image is kept as WebP.
+
+`kind` is computed on the requested page range. If you can, convert the original PDF instead.
+
+### Triage and Granite Vision fallback
+
+- **Triage**: before conversion, each PDF is profiled in a few milliseconds (text per page, images, shapes) and labelled `texte`, `présentation` or `scan` (report field `kind`).
+- **Granite Vision is only a fallback**: the main conversion no longer runs it. Only pages where a chart could not be read as vector are converted again with Granite (report field `granite_pages`). A text PDF therefore never loads Granite, and the 15 test slides went from 167 s to 22 s.
+- **OCR stays on everywhere**: Docling's OCR is selective (regions without PDF text, pages with broken or scanned text) and costs only about 5 s per PDF. Measured on a pure-text report, turning it off loses headings that are present in the PDF.
+
+### Quality checks
+
+Checks applied to model output (details in [debug_note.md](debug_note.md)):
+
+- a Granite table is rejected if it has empty labels, rows without numbers, or a column that is too often empty; a "merged" table of two neighbouring charts is split in two;
+- **cross-check (v9)**: when Granite's table is accepted and a vision model is configured, the vision model reads the same chart too. The two readings are compared **label → value** (comparing the set of values would miss a swap). They agree when at least 80 % of Granite's rows are found by label and at least 90 % of the compared cells are equal. If they disagree, both tables are dropped: the values from the text layer are written without labels (`*Valeurs lues sans rattachement établi (Granite et modèle vision en désaccord) : …*`), the image is kept, and the report gets a warning. Vector reads are never cross-checked: they are exact. The cross-check costs one extra vision-model call per Granite chart (about 20 s each with Qwen2.5-VL-7B on an Apple Silicon Mac); `--no-cross-check` turns it off;
+- **consistency checks (v9, `controles.py`)**: a "Total …" column or row must equal the sum of a contiguous run of at least 2 sibling values (±1 point for rounding); pie values and each row of a stacked bar must sum to 100 (±2 points, or 0.5 point per summed value when there are many). Profile bars ("Hommes 52 %, Femmes 34 %") are never summed. Problems are **flagged, never rejected**: picture note, report warning, and the `Lecture :` line. Vector results go through the same checks as a self-test of the reader: a failure there means a reader bug, is reported as such, and leaves the output unchanged;
+- vision model output is rejected if more than half of its numbers are absent from the page's text layer (invented values);
+- Mermaid is rejected if it encodes numbers, and the request is retried in table mode;
+- no interpretation or "trend" sentences: in table mode, only the title and the table are kept;
+- titles and values that Docling "swallows" into the image are restored from the text layer;
+- tables with a shifted grid are fixed without a model when the pattern is known (the Ifop "margins of error" table), otherwise re-read by the vision model; the report tells the two apart;
+- slide noise removed: page numbers, logo read by OCR, and **repeated footer/header lines (v9)**. A line that appears on at least max(5, 30 % of pages) pages, once digits are ignored, is a footer: its copies are removed and the first occurrence is kept. Table rows, headings, code blocks, image links, italics, bullets and chart metadata lines are never touched, and a line whose varying part is anything other than a bare page number (for example "Ensemble des Français : 6%") is never removed. The removed lines are listed in the report (`lignes_repetees_retirees`).
+
+### Vision model errors
+
+The vision model client sorts errors. An HTTP 4xx error other than 408/429 (for example 400 "this model does not accept images") is permanent: it is logged once and not retried. Timeouts, connection errors, 5xx, 408 and 429 are retried (3 attempts, with backoff). **Circuit breaker**: after 3 consecutive images fail on connection or timeout (LM Studio stopped mid-run), the vision model is turned off for the rest of the run, the remaining images are kept as WebP, and each affected PDF gets the warning `modèle vision désactivé après N échecs consécutifs`.
+
+## Installation (once)
 
 ```bash
 python3.12 -m venv .venv
-source .venv/bin/activate          # Windows : .venv\Scripts\activate
-pip install -r requirements.txt    # versions exactes testées : requirements.lock
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt    # exact tested versions: requirements.lock
 ```
 
-- **Python 3.12** est conseillé : c'est la version la plus sûre pour torch et MLX (3.14 a aussi fonctionné).
-- **Activez toujours le `.venv`** avant de lancer le script en ligne de commande. Sans activation, `python` désigne le Python du système, où Docling n'est pas installé (`No module named 'docling'`). Le lanceur `pdf2llm.command` n'a pas ce problème : il appelle directement `.venv/bin/python`.
+- **Python 3.12** is recommended: it is the safest version for torch and MLX (3.14 also worked).
+- **Always activate the `.venv`** before running the script from the command line. Without it, `python` is the system Python, where Docling is not installed (`No module named 'docling'`). The `pdf2llm.command` launcher does not have this problem: it calls `.venv/bin/python` directly.
+- The `[vlm]` extra installs `mlx-vlm` on Apple Silicon Macs. Without it, Granite Vision would run on the CPU, which is very slow; the script then refuses to start.
+- On first run, Docling downloads its models from Hugging Face (layout, tables, picture classifier, Granite Vision, about 8 GB), cached in `~/.cache/huggingface`.
 
-### Déplacer le dossier du projet
+### Moving the project folder
 
-Rien dans le code ne dépend de l'emplacement du dossier, et le dépôt git suit le dossier. Seul le `.venv` contient des chemins absolus : après un déplacement, `source .venv/bin/activate` et `pip` ne fonctionnent plus, mais `.venv/bin/python` et donc le lanceur `pdf2llm.command` continuent de fonctionner. Pour tout remettre en ordre, recréez l'environnement (le lanceur le propose aussi s'il le trouve cassé) :
+Nothing in the code depends on where the folder is, and the git repository moves with it. Only the `.venv` contains absolute paths: after a move, `source .venv/bin/activate` and `pip` stop working, but `.venv/bin/python`, and therefore the `pdf2llm.command` launcher, keep working. To put everything back in order, recreate the environment (the launcher also offers to do it if it finds the environment broken):
 
 ```bash
 rm -rf .venv && python3.12 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt
 ```
 
-Les modèles téléchargés restent dans `~/.cache/huggingface` et ne sont pas retéléchargés. Évitez un dossier synchronisé par iCloud : un `.venv` compte des dizaines de milliers de fichiers.
-- L'extra `[vlm]` installe `mlx-vlm` sur Mac Apple Silicon. Sans lui, Granite Vision tournerait sur le processeur, ce qui est très lent ; le script refuse alors de démarrer.
-- Au premier lancement, Docling télécharge ses modèles depuis Hugging Face (mise en page, tableaux, classifieur d'images, Granite Vision, environ 8 Go), mis en cache dans `~/.cache/huggingface`.
+Downloaded models stay in `~/.cache/huggingface` and are not downloaded again. Avoid a folder synced by iCloud: a `.venv` holds tens of thousands of files.
 
-## Modèle vision (LM Studio)
+## Vision model (LM Studio)
 
-1. Dans LM Studio, chargez un modèle vision, par exemple **Qwen2.5-VL-7B-Instruct** ou **Qwen3-VL-8B**.
-2. Onglet *Developer* → *Start server* (port 1234).
-3. Notez l'identifiant exact du modèle : `curl http://localhost:1234/v1/models`.
+1. In LM Studio, load a vision model, for example **Qwen2.5-VL-7B-Instruct** or **Qwen3-VL-8B**.
+2. *Developer* tab → *Start server* (port 1234).
+3. Note the exact model identifier: `curl http://localhost:1234/v1/models`.
 
-Avec Ollama, ajoutez `--vlm-url http://localhost:11434/v1`.
+With Ollama, add `--vlm-url http://localhost:11434/v1`.
 
-## Utilisation
+## Usage
 
-### Le plus simple : l'assistant
+### The easy way: the wizard
 
-Double-cliquez sur **`pdf2llm.command`** dans le Finder, ou lancez `python pdf2llm.py` sans argument. L'assistant :
+Double-click **`pdf2llm.command`** in the Finder, or run `python pdf2llm.py` with no arguments. The wizard:
 
-1. ouvre une fenêtre Finder pour choisir **un PDF ou un dossier de PDF** ;
-2. propose un dossier de sortie (Entrée pour accepter, `f` pour le choisir dans le Finder) ;
-3. affiche la **liste des modèles chargés dans LM Studio** et vous fait choisir par numéro (message clair si LM Studio n'est pas lancé, possibilité de continuer sans modèle vision) ;
-4. pose quelques questions avec des valeurs par défaut : pages (pour un essai), reconversion des PDF déjà faits, images à garder, fichiers de diagnostic ; les options avancées (lecture vectorielle, OCR, Granite ou modèle vision pour les graphiques, taille des tranches) ne sont proposées que sur demande ;
-5. affiche un résumé et la **commande équivalente**, à recopier pour relancer sans l'assistant.
+1. opens a Finder window to pick **a PDF or a folder of PDFs**;
+2. suggests an output folder (Enter to accept, `f` to pick one in the Finder);
+3. shows the **list of models loaded in LM Studio** and lets you pick one by number (with a clear message if LM Studio is not running, and the option to go on without a vision model);
+4. asks a few questions with defaults: pages (for a trial run), re-converting PDFs already done, which images to keep, diagnostic files; advanced options (vector reading, OCR, Granite or vision model for charts, chunk size) are offered only on request;
+5. shows a summary and the **equivalent command**, to copy and re-run without the wizard.
 
-Les derniers choix sont mémorisés dans `~/.config/pdf2llm/derniers_choix.json` et proposés la fois suivante.
+The last choices are saved in `~/.config/pdf2llm/derniers_choix.json` and offered next time.
 
-Pour l'avoir sur le Bureau : clic droit sur `pdf2llm.command` → *Créer un alias*, puis déplacez l'alias. Au premier lancement, macOS peut demander de confirmer l'ouverture (clic droit → *Ouvrir*).
+To put it on the Desktop: right-click `pdf2llm.command` → *Make Alias*, then move the alias. On first launch, macOS may ask you to confirm opening it (right-click → *Open*). When the run ends, the window says whether it finished cleanly, with warnings, or with errors.
 
-### En ligne de commande
+### Command line
 
 ```bash
-# 1) Test rapide sur 15 pages : vérifiez le résultat avant de tout lancer
+# 1) Quick test on 15 pages: check the result before running everything
 python pdf2llm.py ./pdfs/etude_exemple.pdf ./sortie --pages 1-15 --vlm-model qwen2.5-vl-7b-instruct
 
-# 2) Tout un dossier
+# 2) A whole folder
 python pdf2llm.py ./pdfs ./sortie --vlm-model qwen2.5-vl-7b-instruct
 
-# 3) Diagnostic : ajoute sortie/_debug/ (JSON Docling + fiche de chaque image)
+# 3) Diagnostics: adds sortie/_debug/ (Docling JSON + a record for each picture)
 python pdf2llm.py ./pdfs/etude_exemple.pdf ./sortie --pages 1-15 --vlm-model qwen2.5-vl-7b-instruct --force --dump-debug 2>&1 | tee run.log
 ```
 
-Le script peut être interrompu et relancé : les PDF déjà convertis sont sautés et les réponses du modèle vision sont en cache (`sortie/.vlm_cache.json`).
+The script can be stopped and restarted: PDFs already converted are skipped, and the vision model's answers are cached (`sortie/.vlm_cache.json`).
 
-### Fichiers produits
+### Exit codes
 
-| Fichier | Contenu |
+| Code | Meaning |
 |---|---|
-| `nom.md` | Le Markdown pour le LLM |
-| `nom_assets/*.webp` | Images conservées (photos, cartes…), selon `--keep-images` |
-| `nom.report.json` | Bilan du PDF : type (`texte`, `présentation`, `scan`), décision par type d'image (`vector`, `chart_table`, `vlm`…), pages reconverties par Granite, tokens estimés, lignes de bruit retirées, avertissements |
-| `_resume.json` | Bilan de tous les PDF |
-| `_debug/` | Avec `--dump-debug` : `*.docling.json` (document Docling complet) et `*.pictures.json` (classe, page, boîte, décision, sortie brute du modèle, note de chaque image) |
+| `0` | Every PDF converted, no warnings |
+| `1` | At least one PDF failed |
+| `2` | Everything converted, but at least one report has warnings: irregular table, PDF without a text layer, inconsistency, Granite / vision model disagreement, vision model turned off by the circuit breaker |
+
+### Output files
+
+| File | Content |
+|---|---|
+| `name.md` | The Markdown for the LLM |
+| `name_assets/*.webp` | Kept images (photos, maps…), depending on `--keep-images` |
+| `name.report.json` | Report for the PDF (fields below) |
+| `_resume.json` | Reports for all PDFs |
+| `_debug/` | With `--dump-debug`: `*.docling.json` (full Docling document) and `*.pictures.json` (class, page, box, decision, raw model output, note for each picture) |
+
+Fields of `name.report.json`:
+
+| Field | Content |
+|---|---|
+| `kind` | `texte`, `présentation` or `scan` |
+| `actions`, `labels` | Decision per picture (`vector`, `chart_table`, `vlm`…) and picture classes |
+| `granite_pages` | Pages converted again with Granite Vision |
+| `vector_tables` | Docling "tables" re-read as vector charts |
+| `md_chars`, `md_tokens_est`, `webp_bytes` | Output size |
+| `noise_lines_removed` | Slide numbers and OCR logo lines removed |
+| `lignes_repetees_retirees` | Repeated footer/header lines removed: `{text of the first occurrence: copies removed}` |
+| `durees` | Seconds per stage: `triage`, `docling`, `vectoriel`, `granite`, `vlm` (including cross-checks), `tableaux` (including vision model re-reads of tables), `serialisation` |
+| `ram_max_mo` | Peak resident memory of the process so far, in MB |
+| `seconds` | Total time for the PDF |
+| `warnings` | Warnings: irregular table (to check, fixed without a model, or re-read by the vision model), scan, inconsistency, cross-check disagreement, circuit breaker, vector self-test failure |
+
+The log also prints one line per PDF, for example `durées : docling 14 s, granite 210 s, vlm 31 s ; RAM max 9,8 Go`.
 
 ## Options
 
-| Option | Effet |
+| Option | Effect |
 |---|---|
-| `--pages 1-15` | Ne convertit que cette plage de pages |
-| `--force` | Reconvertit les PDF déjà faits |
-| `--dump-debug` | Écrit `sortie/_debug/` pour diagnostiquer sans reconvertir |
-| `--no-vector` | Désactive la lecture vectorielle des graphiques (tout passe par Granite Vision / le modèle vision) |
-| `--charts vlm` | Envoie les graphiques au modèle de LM Studio au lieu de Granite Vision (machine sans GPU) |
-| `--chart-api-url http://localhost:1234/v1` | Fait tourner Granite Vision dans LM Studio (modèle `granite-vision-4.1-4b`, réglable par `--chart-api-model`) |
-| `--mlx` | Force le preset MLX de Granite Vision (inutile en pratique : choisi automatiquement si `mlx-vlm` est installé) |
-| `--keep-images none / visual / all` | WebP conservés : aucun / photos, captures, cartes, plans (défaut) / tous |
-| `--no-vlm` | Sans modèle vision : graphiques en tableaux, le reste gardé en WebP |
-| `--no-ocr` | Coupe l'OCR. **Déconseillé** : gain d'environ 5 s par PDF, mais Docling perd alors du texte (intertitres, puces), même dans des PDF natifs |
-| `--chunk-pages 40` | Convertit par tranches (moins de RAM ; défaut 80) |
-| `--no-table-fallback` | Ne fait pas relire par le modèle vision les tableaux à grille irrégulière |
-| `--no-denoise` | Garde numéros de slide et logo lu par l'OCR |
-| `--no-cell-matching` | TableFormer sans *cell matching* (à essayer si des tableaux sont décalés) |
-| `--vlm-workers`, `--vlm-timeout`, `--vlm-max-tokens` | Réglages des appels au modèle vision |
-| `--min-area`, `--min-px`, `--repeat-threshold`, `--drop-min-conf` | Seuils de suppression des petites images, images répétées et logos |
+| `--pages 1-15` | Converts only this page range |
+| `--force` | Re-converts PDFs already done |
+| `--dump-debug` | Writes `sortie/_debug/` to diagnose without re-converting |
+| `--no-vector` | Turns off vector reading of charts (everything goes through Granite Vision / the vision model) |
+| `--charts vlm` | Sends charts to the LM Studio model instead of Granite Vision (machine without a GPU) |
+| `--chart-api-url http://localhost:1234/v1` | Runs Granite Vision in LM Studio (model `granite-vision-4.1-4b`, set with `--chart-api-model`) |
+| `--mlx` | Forces the MLX preset of Granite Vision (not needed in practice: chosen automatically when `mlx-vlm` is installed) |
+| `--no-cross-check` | No cross-check of Granite tables by the vision model (on by default when a vision model is configured) |
+| `--scan-charts tag / image` | PDFs without a text layer: write model-read numbers with the "invérifiables" tag (default), or do not write them and keep the image |
+| `--keep-images none / visual / all` | WebP kept: none / photos, screenshots, maps, plans (default) / all |
+| `--no-vlm` | No vision model: charts as tables, everything else kept as WebP |
+| `--no-ocr` | Turns OCR off. **Not recommended**: saves about 5 s per PDF, but Docling then loses text (headings, bullets), even in native PDFs |
+| `--chunk-pages 40` | Converts in chunks (less RAM; default 80) |
+| `--no-table-fallback` | Does not ask the vision model to re-read tables with an irregular grid |
+| `--no-denoise` | Keeps slide numbers, the OCR logo and repeated footer/header lines |
+| `--no-cell-matching` | TableFormer without *cell matching* (try it if tables are shifted) |
+| `--vlm-workers`, `--vlm-timeout`, `--vlm-max-tokens` | Settings for vision model calls |
+| `--min-area`, `--min-px`, `--repeat-threshold`, `--drop-min-conf` | Thresholds for dropping small images, repeated images and logos |
 
-Pour changer la consigne donnée au modèle vision, modifiez `VLM_PROMPT` ou `VLM_TABLE_PROMPT` en tête de script et incrémentez `PROMPT_VERSION` pour invalider le cache.
+To change the instructions given to the vision model, edit `VLM_PROMPT` or `VLM_TABLE_PROMPT` at the top of the script and bump `PROMPT_VERSION` to invalidate the cache.
 
 ## Tests
 
 ```bash
-python test_pdf2llm.py        # ou : python -m pytest test_pdf2llm.py
+python test_pdf2llm.py        # or: python -m pytest test_pdf2llm.py
 ```
 
-Les tests unitaires utilisent des données factices et ne demandent aucun fichier ; ceux de la lecture vectorielle génèrent eux-mêmes de petits PDF (barres avec intertitres et texte masqué, secteurs avec légende, barres empilées avec colonne « Total », refus si un nombre reste inexpliqué).
+The unit tests use fake data and need no files. The vector-reading tests generate their own small PDFs (bars with group headings and hidden text, pies with a legend, stacked bars with a "Total" column, refusal when a number stays unexplained).
 
-Trois tests utilisent de vrais fichiers et sont sautés s'ils sont absents :
+### Golden tests (v9)
 
-- `tests/fixtures/exemple.p1-15.docling.json` (ou `PDF2LLM_FIXTURE_JSON`) : un export `--dump-debug` du PDF de développement ;
-- `PDF2LLM_TEST_PDF` : le PDF de développement lui-même (sondage Ifop de 21 pages), pour la lecture vectorielle.
+A golden test converts a whole PDF and compares the Markdown, plus the stable report fields (`kind`, `actions`, `granite_pages`, `vector_tables`, `warnings`), with an expected version that has been reviewed. Every change to the output must show up as a golden diff and be re-baselined on purpose.
 
-Ces fichiers ne sont pas versionnés. Les valeurs attendues correspondent à ce PDF.
+- **Synthetic (committed)**: `tests/golden_gen.py` generates 3 small multi-page slide decks (bars with group headings, donut with a legend, stacked bars with a "Total" column, recall block, key figure, one chart that must be refused). They are converted without any model (`--no-vlm`, Granite off). The expected outputs are in `tests/golden/`. `python test_pdf2llm.py` runs them.
+- **Local (not committed)**: your own PDFs, in the folder given by `PDF2LLM_GOLDEN_DIR` (default `tests/fixtures/golden/`, ignored by git): `x.pdf`, the expected `x.attendu.md` (and `x.attendu.report.json`), and an optional `x.args` file with the command-line options (for example `--pages 10-25 --vlm-model qwen2.5-vl-7b-instruct`; without it, `--no-vlm`). Outputs go to `<folder>/_sortie/`, which also keeps the vision model cache, so a re-run reads the same answers. The test suite runs them only when `PDF2LLM_GOLDEN_DIR` is set.
 
-## Organisation du code (`pdf2llm.py`)
+```bash
+python tools/golden.py check            # unified diff per file, exit code 1 on any difference
+python tools/golden.py update           # rewrite the expected files after reviewing the diff
+python tools/golden.py check --only g3_refus --synthetiques
+PDF2LLM_GOLDEN_DIR=~/pdf-golden python tools/golden.py check --locaux
+```
 
-| Section | Rôle |
+### Other real-file tests
+
+Two more tests use real files and are skipped when they are missing:
+
+- `tests/fixtures/exemple.p1-15.docling.json` (or `PDF2LLM_FIXTURE_JSON`): a `--dump-debug` export of the development PDF;
+- `PDF2LLM_TEST_PDF`: the development PDF itself (a 21-page Ifop survey), for vector reading.
+
+These files are not committed. The expected values match that PDF.
+
+## Code layout
+
+| Part | Role |
 |---|---|
-| `wizard.py`, `pdf2llm.command` | Assistant interactif (Finder, liste des modèles LM Studio, questions, mémoire des choix ; `answers_to_argv` traduit les réponses en options) et lanceur à double-cliquer |
-| `chart_format.py` (module séparé) | Format commun des graphiques : `ChartMeta`, `split_meta` (question, base, source), `render` ; dans `pdf2llm.py`, `build_chart_blocks` rattache les métadonnées de la page au bon graphique |
-| `vector_charts.py` (module séparé) | Mots, lignes, formes et légende de chaque page (pypdfium2) ; visibilité par le rendu ; `read_region` reconstruit le graphique d'une zone ou lève `Unreadable` |
-| Triage par classe, consignes | Classes d'images de Docling (graphique, à supprimer, visuelle) ; consignes du modèle vision |
-| Utilitaires image, `VlmClient` | Réduction, empreinte des images répétées, WebP ; client API compatible OpenAI avec cache |
-| Contrôles qualité | `chart_rows_problem`, `split_sparse`, `invented_values`, `vlm_output_problem`, `keep_table_only`, `denoise_markdown` |
-| Couche texte du PDF | `text_items_near`, `pie_text_block`, `uncovered_titles`, `uncovered_texts` : texte que Docling place sous les images |
-| Tableaux décalés | `irregular_tables`, `fixed_table_md`, `decide_tables` |
-| Correctif Granite | `tolerant_csv_to_dataframe` remplace une fonction interne de Docling 2.149 (libellés avec virgule) |
-| Décision par image | `decide_pictures` : lecture vectorielle d'abord, puis arbre de décision habituel, appels parallèles au modèle vision |
-| Sérialisation | Sérialiseurs Markdown de Docling surchargés pour substituer images et tableaux |
-| Triage, repli Granite | `profile_pages`, `pdf_kind`, `ConverterPool` (convertisseurs créés à la demande), `granite_fallback` (reconversion des seules pages à graphique non lu) |
-| Conversion, `main` | Options du convertisseur, découpage en tranches, rapports, reprise |
+| `wizard.py`, `pdf2llm.command` | Interactive wizard (Finder, list of LM Studio models, questions, saved choices; `answers_to_argv` turns answers into options) and double-click launcher |
+| `chart_format.py` (separate module) | Common chart format: `ChartMeta` (including `lecture`), `split_meta` (question, base, source), `render`; in `pdf2llm.py`, `build_chart_blocks` attaches page metadata to the right chart |
+| `vector_charts.py` (separate module) | Words, lines, shapes and legend of each page (pypdfium2); visibility from a render (freed once computed); `read_region` rebuilds the chart of an area or raises `Unreadable` |
+| `controles.py` (separate module) | Arithmetic consistency checks of survey tables: `controles_coherence`, `md_tables` |
+| Picture triage, prompts | Docling picture classes (chart, to drop, visual); vision model prompts |
+| Image utilities, `VlmClient` | Downscaling, repeated-image fingerprint, WebP; OpenAI-compatible API client with cache, error sorting and circuit breaker |
+| Quality checks | `chart_rows_problem`, `split_sparse`, `invented_values`, `vlm_output_problem`, `keep_table_only`, `denoise_markdown`, `repeated_lines` |
+| PDF text layer | `text_items_near`, `pie_text_block`, `uncovered_titles`, `uncovered_texts`: text that Docling puts under pictures |
+| Shifted tables | `irregular_tables`, `fixed_table_md`, `decide_tables` |
+| Granite patch | `tolerant_csv_to_dataframe` replaces an internal Docling 2.149 function (labels with a comma); upstream draft in `upstream/docling-granite-csv.md` |
+| Per-picture decision | `decide_pictures`: vector reading first, then the usual decision tree, Granite × vision model cross-check (`compare_readings`, `apply_cross_check`), parallel vision model calls |
+| Serialisation | Docling Markdown serializers overridden to substitute pictures and tables |
+| Triage, Granite fallback | `profile_pages`, `pdf_kind`, `ConverterPool` (converters built on demand), `granite_fallback` (re-converts only the pages with an unread chart) |
+| Conversion, `main` | Converter options, chunking, timings (`Chrono`), reports, resume, exit codes; `build_parser` / `run` |
+| `tools/golden.py`, `tests/` | Golden tests: runner, synthetic deck generator, shared PDF builders (`tests/pdfgen.py`), expected outputs |
 
-## Limites connues et pistes
+## Known limits and next steps
 
-- Les seuils des contrôles ont été calibrés sur un seul document (sondage Ifop) ; à valider sur d'autres PDF.
-- `fixed_table_md` ne reconnaît que le motif Ifop « marges d'erreur ».
-- La lecture vectorielle couvre les barres (simples, empilées, horizontales ou verticales) et les secteurs. Les **courbes** (séries distinguées par la couleur du texte des valeurs) et les grands **tableaux dessinés en texte libre** ne sont pas encore lus : ils passent par Granite Vision, qui les restitue mal (rapport Ipsos p. 57 : une seule des séries retrouvée).
-- Le **texte masqué** n'est écarté que dans les graphiques ; hors graphique, Docling l'extrait encore comme du texte normal.
+- The check thresholds were calibrated on a single document (Ifop survey); the golden corpus is there to validate them on other PDFs.
+- `fixed_table_md` only recognises the Ifop "margins of error" pattern.
+- Vector reading covers bars (simple, stacked, horizontal or vertical) and pies. **Line charts** (series told apart by the colour of their value text) and large **tables drawn as free text** are not read yet: they go through Granite Vision, which renders them poorly (Ipsos report p. 57: only one of the series found).
+- **Hidden text** is filtered only inside charts; outside charts, Docling still extracts it as normal text.
+- Consistency checks only flag problems in v9; rejecting tables on that basis will come once the flags have been checked on a larger corpus.
 
-Historique des versions, problèmes rencontrés et vérifications : [debug_note.md](debug_note.md).
+Version history, problems met and checks: [debug_note.md](debug_note.md) (in French).
