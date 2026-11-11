@@ -169,43 +169,8 @@ def test_v9_t1_unites_de_la_ram_et_chrono():
 # --------------------------------------------------------------------------------------
 # Lecture vectorielle (vector_charts.py) sur des PDF factices générés ici
 # --------------------------------------------------------------------------------------
-def _pdf(ops: list[str], path: Path) -> Path:
-    """PDF d'une page 960 x 540 dont le contenu est la liste d'opérateurs `ops`
-    (Helvetica standard, encodage WinAnsi pour les accents)."""
-    content = "\n".join(ops).encode("cp1252")
-    objs = [b"<< /Type /Catalog /Pages 2 0 R >>",
-            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 960 540] "
-            b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
-            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
-            b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream"]
-    out, offs = bytearray(b"%PDF-1.4\n"), []
-    for i, o in enumerate(objs, 1):
-        offs.append(len(out))
-        out += b"%d 0 obj\n" % i + o + b"\nendobj\n"
-    xref = len(out)
-    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
-    out += b"".join(b"%010d 00000 n \n" % o for o in offs)
-    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
-    path.write_bytes(bytes(out))
-    return path
-
-
-def _txt(x, y, s, size=10, rgb=(0.25, 0.25, 0.25)):
-    s = s.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-    return f"BT /F1 {size} Tf {rgb[0]} {rgb[1]} {rgb[2]} rg {x} {y} Td ({s}) Tj ET"
-
-
-def _rect(x, y, w, h, rgb):
-    return f"{rgb[0]} {rgb[1]} {rgb[2]} rg {x} {y} {w} {h} re f"
-
-
-def _poly(pts, rgb):
-    path = " ".join(f"{x} {y} {'m' if i == 0 else 'l'}" for i, (x, y) in enumerate(pts))
-    return f"{rgb[0]} {rgb[1]} {rgb[2]} rg {path} h f"
-
-
-TEAL, CORAL, GREY = (0.18, 0.4, 0.4), (0.98, 0.55, 0.52), (0.6, 0.6, 0.6)
+sys.path.insert(0, str(HERE / "tests"))
+from pdfgen import CORAL, GREY, TEAL, pdf as _pdf, poly as _poly, rect as _rect, txt as _txt  # noqa: E402,F401
 
 
 def _vec():
@@ -578,6 +543,40 @@ def test_fixture_lecture_vectorielle_du_vrai_pdf():
     prof = read(10)                       # profil p. 8 : intertitres conservés
     assert prof and "| Statut | Valeur |" in prof.text and "| CHOMEURS | 39% |" in prof.text, \
         doc.last_reason
+
+
+# --------------------------------------------------------------------------------------
+# Golden : sortie complète comparée à une version validée (tools/golden.py)
+# --------------------------------------------------------------------------------------
+def _golden():
+    sys.path.insert(0, str(HERE / "tools"))
+    import golden
+    return golden
+
+
+def _golden_report(bad: dict) -> str:
+    return "\n".join(f"=== {k}\n" + "\n".join(v) for k, v in bad.items())
+
+
+def test_v9_t2_goldens_synthetiques():
+    """PDF générés (tests/golden_gen.py), convertis sans modèle : Markdown et rapport
+    identiques à tests/golden/. Après un changement voulu : python tools/golden.py update."""
+    import tempfile
+    g = _golden()
+    bad = g.check_cases(g.synthetic_cases(Path(tempfile.mkdtemp(prefix="pdf2llm_golden_"))))
+    assert not bad, "sortie modifiée (python tools/golden.py check) :\n" + _golden_report(bad)
+
+
+def test_v9_t2_goldens_locaux():
+    """Vrais PDF de l'utilisateur (PDF2LLM_GOLDEN_DIR : x.pdf + x.attendu.md + x.args)."""
+    if not os.environ.get("PDF2LLM_GOLDEN_DIR"):
+        return "sauté"
+    g = _golden()
+    cases = g.local_cases(only_baselined=True)
+    if not cases:
+        return "sauté"
+    bad = g.check_cases(cases)
+    assert not bad, "sortie modifiée :\n" + _golden_report(bad)
 
 
 if __name__ == "__main__":

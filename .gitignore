@@ -18,8 +18,12 @@ sortie_*/
 .vlm_cache.json
 _resume.json
 *.report.json
+!tests/golden/*.report.json
 run.log
 *.log
 
 # Données de test locales (dérivées des PDF)
 tests/fixtures/
+
+# Dossier de PDF et d images d essai fourni localement (documents de tiers)
+pdf_or_image_of_pdf_for_testing_purpose/

@@ -1599,6 +1599,12 @@ def main(argv: list[str] | None = None) -> int:
         if not argv:
             print("Abandon : rien n'a été converti.")
             return 0
+    ap = build_parser()
+    args = ap.parse_args(argv)
+    return run(ap, args)
+
+
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("input", type=Path, help="Dossier de PDF (ou un seul PDF)")
@@ -1653,7 +1659,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-cell-matching", action="store_true",
                    help="TableFormer sans cell matching (à tester si les tableaux sont décalés)")
     p.add_argument("-v", "--verbose", action="store_true")
-    args = ap.parse_args(argv)
+    return ap
+
+
+def run(ap: argparse.ArgumentParser, args: argparse.Namespace) -> int:
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
