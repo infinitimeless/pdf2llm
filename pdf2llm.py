@@ -78,7 +78,7 @@ except ImportError:  # pragma: no cover
     VectorDocument = None  # type: ignore[assignment,misc]
 
 from chart_format import ChartMeta, render as render_chart, split_meta, looks_like_question
-from controles import controles_coherence, md_tables, short_tags
+from controles import controles_coherence, md_tables, num as cell_num, short_tags
 
 log = logging.getLogger("pdf2llm")
 
@@ -183,6 +183,41 @@ def model_checks(text: str, label: str) -> list[str]:
     for rows in md_tables(text):
         out += controles_coherence(rows, hint)
     return list(dict.fromkeys(out))
+
+
+def _row_index(rows: list[list[str]]) -> dict[str, list[list[float]]]:
+    """Libellé normalisé -> valeurs de chaque ligne (en-tête exclu). Le libellé est le
+    dernier texte avant la première valeur : une colonne « Groupe » placée devant (VLM)
+    ne gêne pas le rapprochement."""
+    out: dict[str, list[list[float]]] = {}
+    for r in rows[1:]:
+        k = next((i for i, c in enumerate(r) if cell_num(c) is not None), len(r))
+        labels = [c for c in r[:k] if c.strip()]
+        if not labels:
+            continue
+        vals = [v for v in (cell_num(c) for c in r[k:]) if v is not None]
+        out.setdefault(_norm(labels[-1]), []).append(vals)
+    return out
+
+
+def compare_readings(g_rows: list[list[str]], v_rows: list[list[str]]) -> tuple[bool, str]:
+    """Double lecture d'un graphique non vectoriel : Granite contre modèle vision, en
+    comparant LIBELLÉ -> VALEUR (comparer l'ensemble des valeurs ne verrait pas une
+    permutation). Concordance : au moins 80 % des lignes de Granite retrouvées par leur
+    libellé, et au moins 90 % des cellules comparées égales."""
+    g, v = _row_index(g_rows), _row_index(v_rows)
+    n_g = sum(len(x) for x in g.values())
+    matched = compared = equal = 0
+    for lab, g_list in g.items():
+        for gv, vv in zip(g_list, v.get(lab, [])):
+            matched += 1
+            for a, b in zip(gv, vv):
+                compared += 1
+                equal += abs(a - b) < 1e-6
+    if not n_g or not compared:
+        return False, f"aucune valeur comparable ({matched}/{n_g} lignes rapprochées)"
+    ok = matched / n_g >= 0.8 and equal / compared >= 0.9
+    return ok, (f"{matched}/{n_g} lignes rapprochées, {equal}/{compared} valeurs égales")
 
 
 def vector_checks(body: str, kind: str, series: list[str]) -> list[str]:
@@ -872,6 +907,7 @@ class PicDecision:
     meta_refs: list[str] = field(default_factory=list)  # textes du PDF repris dans `meta`
     lecture: str = ""             # provenance des chiffres lus par un modèle (« Lecture : »)
     coherence: list[str] = field(default_factory=list)  # contrôles arithmétiques en échec
+    warning: str = ""             # avertissement du rapport propre à cette image
 
 
 @dataclass
@@ -1102,6 +1138,37 @@ def strip_labels(text: str, labels: set[str]) -> str:
     return t
 
 
+CROSS_DISAGREE = "Granite et modèle vision en désaccord"
+
+
+def apply_cross_check(doc: DoclingDocument, pic: PictureItem, d: PicDecision,
+                      g_rows: list[list[str]], v_text: str | None, scan: bool = False) -> None:
+    """Résultat de la double lecture d'un graphique lu par Granite. Concordance : tableau
+    Granite gardé, « 2 modèles concordants ». Désaccord : une donnée absente vaut mieux
+    qu'une donnée fausse -> les deux tableaux sont écartés, les valeurs de la couche texte
+    sont écrites SANS rattachement, l'image est gardée en WebP."""
+    d.raw = (d.raw + "\n\n" if d.raw else "") + "DOUBLE LECTURE VLM:\n" + (v_text or "")
+    tables = md_tables(v_text or "")
+    if not v_text or is_decorative(v_text) or not tables:
+        d.note = (d.note + " ; " if d.note else "") + "double lecture impossible (VLM)"
+        return
+    # chaque tableau du VLM a son en-tête : on les écarte, une ligne d'en-tête factice
+    v_rows = [["en-tête"]] + [r for t in tables for r in t[1:]]
+    ok, detail = compare_readings(g_rows, v_rows)
+    if ok:
+        d.lecture = lecture_text("2", scan)
+        d.note = (d.note + " ; " if d.note else "") + f"double lecture concordante ({detail})"
+        return
+    vals = [t for t in texts_near(doc, pic, 0) if re.search(r"\d", t)]
+    d.action, d.lecture, d.meta, d.body = "image", "", None, ""
+    d.text = ("*Valeurs lues sans rattachement établi (Granite et modèle vision en désaccord) : "
+              + " ; ".join(vals) + "*") if vals else ""
+    d.reason = CROSS_DISAGREE
+    d.note = (d.note + " ; " if d.note else "") + f"double lecture en désaccord ({detail})"
+    d.warning = f"{CROSS_DISAGREE} ({detail}), graphique gardé en image"
+    log.info("    p.%s : %s (%s) -> image", d.page, CROSS_DISAGREE, detail)
+
+
 def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClient | None,
                     assets_dir: Path, stem: str, img_offset: int,
                     vec: "VectorDocument | None" = None,
@@ -1198,7 +1265,10 @@ def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClie
                 tabular[p.self_ref] = max(cands, key=lambda x: x[0])[1]
 
     # 3) Chemin habituel pour ce qui reste : tableau Granite contrôlé, texte de la
-    #    couche PDF pour les camemberts, légende sans valeur, modèle vision
+    #    couche PDF pour les camemberts, légende sans valeur, modèle vision.
+    #    Tableau Granite accepté + modèle vision : double lecture (`to_cross`, v9)
+    cross = vlm is not None and not getattr(args, "no_cross_check", False)
+    to_cross: list[tuple[PictureItem, list[list[str]]]] = []
     for pic in rest:
         d = decisions[pic.self_ref]
         label = d.label
@@ -1214,6 +1284,8 @@ def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClie
                     d.text = rows_to_md(rows)
                     if getattr(tc, "title", None):
                         d.meta = ChartMeta(title=[tc.title.strip()])
+                    if cross:
+                        to_cross.append((pic, rows))
                     continue
                 tabs = split_sparse(rows)
                 if tabs and all(chart_rows_problem(t) is None for t in tabs):
@@ -1221,6 +1293,8 @@ def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClie
                     d.note = "tableau Granite fusionné, scindé en %d" % len(tabs)
                     d.lecture = lecture_text("granite", scan)
                     d.text = "\n\n".join(rows_to_md(t) for t in tabs)
+                    if cross:
+                        to_cross.append((pic, rows))
                     continue
                 d.note = (d.note + " ; " if d.note else "") + f"Granite rejeté : {prob}"
                 d.raw = "GRANITE:\n" + rows_to_md(rows)
@@ -1242,8 +1316,13 @@ def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClie
         else:
             d.action, d.reason = "image", "pas de modèle vision"
 
-    # Appels au modèle vision, en parallèle
-    if to_vlm and vlm is not None:
+    # Appels au modèle vision, en parallèle (images à lire + doubles lectures)
+    if (to_vlm or to_cross) and vlm is not None:
+        def cross_work(p: PictureItem) -> str | None:
+            d0 = decisions[p.self_ref]
+            return vlm.ask(images[p.self_ref], d0.label, "table",
+                           " | ".join(texts_near(doc, p, 80)))
+
         def work(p: PictureItem) -> tuple[str, str | None, str, str]:
             d0 = decisions[p.self_ref]
             mode = "table" if d0.label in TABLE_MODE_LABELS else "auto"
@@ -1285,6 +1364,7 @@ def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClie
 
         t_vlm = time.perf_counter()
         with ThreadPoolExecutor(max_workers=args.vlm_workers) as ex:
+            crossed = [(p, rows, ex.submit(cross_work, p)) for p, rows in to_cross]
             for i, (ref, text, raw, note) in enumerate(ex.map(work, to_vlm), 1):
                 d = decisions[ref]
                 d.raw = (d.raw + "\n\n" + raw).strip() if d.raw else raw
@@ -1303,6 +1383,8 @@ def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClie
                 if i % 10 == 0:
                     vlm.save_cache()
                     log.info("    VLM : %d/%d images", i, len(to_vlm))
+            for p, rows, fut in crossed:
+                apply_cross_check(doc, p, decisions[p.self_ref], rows, fut.result(), scan)
         vlm.save_cache()
         chrono.add("vlm", time.perf_counter() - t_vlm)
 
@@ -1657,6 +1739,8 @@ def process_pdf(pdf: Path, out_dir: Path, pool: ConverterPool,
         img_count += sum(1 for d in decisions.values() if d.image_rel)
         all_decisions.extend(decisions.values())
         for d in decisions.values():
+            if d.warning:
+                rep.warnings.append(f"p. {d.page} : {d.warning}")
             for prob in d.coherence:
                 rep.warnings.append(f"p. {d.page} : {VECTOR_CHECK} : {prob}" if d.action == "vector"
                                     else f"p. {d.page} : incohérence {prob}")
@@ -1749,6 +1833,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Faire tourner Granite Vision via une API (ex. LM Studio) au lieu d'en local")
     c.add_argument("--chart-api-model", default="granite-vision-4.1-4b")
     c.add_argument("--mlx", action="store_true", help="Mac Apple Silicon : Granite Vision en MLX")
+    c.add_argument("--no-cross-check", action="store_true",
+                   help="Pas de double lecture des graphiques lus par Granite : par défaut, si "
+                        "un modèle vision est configuré, il relit aussi ces graphiques et un "
+                        "désaccord libellé -> valeur écarte les deux lectures")
     c.add_argument("--scan-charts", choices=["tag", "image"], default="tag",
                    help="PDF sans couche texte (scan, capture) : tag = chiffres lus par un modèle "
                         "écrits avec la mention « invérifiables » (défaut) ; image = non écrits, "

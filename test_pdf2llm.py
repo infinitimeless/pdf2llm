@@ -662,6 +662,48 @@ def test_v9_t5_controles_de_coherence():
     assert p.model_checks(body, "pie_chart") and not p.model_checks(body, "bar_chart")
 
 
+def test_v9_t6_double_lecture_granite_vlm():
+    g = [["Libellé", "Valeur"], ["Oui, souvent", "23%"], ["Oui, parfois", "20%"], ["Non", "57%"]]
+    same = ("**Titre**\n\n| Réponse | % |\n|---|---|\n| Non | 57% |\n| Oui, souvent | 23% |\n"
+            "| Oui, parfois | 20% |")
+    ok, detail = p.compare_readings(g, [["h"]] + p.md_tables(same)[0][1:])
+    assert ok, detail
+    # valeurs permutées entre deux libellés : désaccord (le multiensemble serait identique)
+    swap = [["h"], ["Oui, souvent", "20%"], ["Oui, parfois", "23%"], ["Non", "57%"]]
+    ok, detail = p.compare_readings(g, swap)
+    assert not ok and "1/3 valeurs égales" in detail, detail
+    # colonne « Groupe » ajoutée par le VLM : le libellé est retrouvé quand même
+    grp = [["h"], ["Fréquence", "Oui, souvent", "23%"], ["Fréquence", "Oui, parfois", "20%"],
+           ["Fréquence", "Non", "57%"]]
+    assert p.compare_readings(g, grp)[0]
+    # libellés partiellement retrouvés (2 sur 3 < 80 %) : désaccord
+    part = [["h"], ["Oui souvent", "23%"], ["Jamais", "20%"], ["Non", "57%"]]
+    ok, detail = p.compare_readings(g, part)
+    assert not ok and detail.startswith("2/3 lignes"), detail
+
+    # application : concordance -> « 2 modèles concordants » ; désaccord -> image + valeurs
+    # de la couche texte sans rattachement + avertissement
+    doc = NS(texts=[NS(text="57%", prov=[NS(page_no=1, bbox=NS(l=10, t=50, r=20, b=40))]),
+                    NS(text="Titre", prov=[NS(page_no=1, bbox=NS(l=10, t=90, r=40, b=80))])])
+    pic = _fake_pic("#/pictures/0")
+    d = p.PicDecision(action="chart_table", text=p.rows_to_md(g), page=1,
+                      lecture=p.lecture_text("granite"))
+    p.apply_cross_check(doc, pic, d, g, same)
+    assert d.action == "chart_table" and d.lecture == "2 modèles concordants, valeurs non vérifiées"
+    d = p.PicDecision(action="chart_table", text=p.rows_to_md(g), page=1,
+                      lecture=p.lecture_text("granite"))
+    p.apply_cross_check(doc, pic, d, g, "| L | % |\n|---|---|\n| Oui, souvent | 20% |\n"
+                        "| Oui, parfois | 23% |\n| Non | 57% |")
+    assert d.action == "image" and not d.lecture and d.warning.startswith(p.CROSS_DISAGREE)
+    assert d.text == ("*Valeurs lues sans rattachement établi (Granite et modèle vision en "
+                      "désaccord) : 57%*"), d.text
+    # VLM muet : on garde Granite tel quel
+    d = p.PicDecision(action="chart_table", text="x", lecture=p.lecture_text("granite"))
+    p.apply_cross_check(doc, pic, d, g, None)
+    assert d.action == "chart_table" and "impossible" in d.note
+    assert p.build_parser().parse_args(["a", "b", "--no-cross-check"]).no_cross_check
+
+
 # --------------------------------------------------------------------------------------
 # Golden : sortie complète comparée à une version validée (tools/golden.py)
 # --------------------------------------------------------------------------------------
