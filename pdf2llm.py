@@ -835,6 +835,68 @@ def denoise_markdown(md: str) -> tuple[str, int]:
     return re.sub(r"\n{3,}", "\n\n", res), removed
 
 
+# Lignes de métadonnées d'un graphique : elles se répètent légitimement d'une slide à
+# l'autre (« Base : ensemble des Français ») et ne sont jamais retirées comme répétitions.
+META_PREFIXES = ("Titre :", "Question :", "Base :", "Légende :", "Source :", "Annotations :",
+                 "Lecture :")
+
+
+def repeated_lines(md: str, pages: int) -> tuple[str, dict[str, int]]:
+    """Pied ou en-tête de page répété (Ipsos : sur 123 slides sur 128) que Docling n'a pas
+    étiqueté comme tel. Une ligne est retirée si, normalisée (minuscules, chiffres et
+    espaces en trop retirés : le numéro de page varie), elle apparaît au moins
+    max(5, 30 % des pages) fois. Jamais examinées : lignes de tableau, titres, blocs de
+    code (Mermaid), liens d'image, italiques et puces (valeurs lues dans un graphique),
+    citations, métadonnées de graphique. Garde-fou contre la perte de données : d'une
+    occurrence à l'autre, un seul nombre peut varier, et seulement un entier nu (numéro de
+    page) ; « Ensemble des Français : 6% » répété avec d'autres valeurs reste en place. La
+    première occurrence est gardée (le pied de page dit souvent l'étude et l'institut).
+    Renvoie (Markdown, {texte de la 1re occurrence : nombre de copies retirées})."""
+    threshold = max(5, -(-3 * pages // 10))
+    lines = md.split("\n")
+    keys: list[str | None] = [None] * len(lines)
+    in_code = False
+    for i, l in enumerate(lines):
+        st = l.strip()
+        if st.startswith("```"):
+            in_code = not in_code
+            continue
+        if (in_code or not st or st.startswith(("|", "#", "!", "*", "-", ">", "<"))
+                or st.startswith(META_PREFIXES)):
+            continue
+        k = " ".join(re.sub(r"\d", " ", st.lower()).split())
+        if len(re.findall(r"[^\W\d_]", k)) >= 3:
+            keys[i] = k
+    groups: dict[str, list[tuple[str, ...]]] = {}
+    for l, k in zip(lines, keys):
+        if k:
+            groups.setdefault(k, []).append(
+                tuple(re.findall(r"\d+(?:[.,]\d+)?\s*%?", l.strip())))
+
+    def page_number_only(nums: list[tuple[str, ...]]) -> bool:
+        if len({len(t) for t in nums}) != 1:
+            return False
+        varying = [i for i in range(len(nums[0])) if len({t[i] for t in nums}) > 1]
+        return len(varying) <= 1 and all(re.fullmatch(r"\d{1,4}", t[i])
+                                          for i in varying for t in nums)
+    drop = {k for k, nums in groups.items() if len(nums) >= threshold and page_number_only(nums)}
+    if not drop:
+        return md, {}
+    removed: dict[str, int] = {}
+    first: dict[str, str] = {}
+    out = []
+    for l, k in zip(lines, keys):
+        if k in drop:
+            if k not in first:           # première occurrence gardée : rien n'est perdu
+                first[k] = l.strip()
+                out.append(l)
+                continue
+            removed[first[k]] = removed.get(first[k], 0) + 1
+            continue
+        out.append(l)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)), removed
+
+
 def table_warnings(doc: DoclingDocument, fixed: set[str] | None = None) -> list[str]:
     """Tableaux irréguliers NON corrigés (les corrigés sont signalés à part)."""
     return [f"p. {it.prov[0].page_no if it.prov else '?'} : tableau à grille irrégulière, "
@@ -984,6 +1046,7 @@ class DocReport:
     kind: str = ""                # triage : texte | présentation | scan
     granite_pages: list[int] = field(default_factory=list)   # pages reconverties par Granite
     vector_tables: int = 0        # « tableaux » Docling relus comme graphiques vectoriels
+    lignes_repetees_retirees: dict[str, int] = field(default_factory=dict)  # pied de page...
     durees: dict[str, float] = field(default_factory=dict)   # secondes par étape (STAGES)
     ram_max_mo: float = 0.0       # pic de mémoire résidente du processus (Mo)
     warnings: list[str] = field(default_factory=list)
@@ -1825,6 +1888,7 @@ def process_pdf(pdf: Path, out_dir: Path, pool: ConverterPool,
     t_ser = time.perf_counter()
     md = "\n".join(md_parts)
     if not args.no_denoise:
+        md, rep.lignes_repetees_retirees = repeated_lines(md, rep.pages)
         md, rep.noise_lines_removed = denoise_markdown(md)
     if scan:
         md = SCAN_BANNER + "\n\n" + md
@@ -1933,7 +1997,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-table-fallback", action="store_true",
                    help="Ne pas faire relire par le VLM les tableaux à grille irrégulière")
     p.add_argument("--no-denoise", action="store_true",
-                   help="Ne pas retirer les numéros de slide et le logo lu par l'OCR")
+                   help="Ne pas retirer les numéros de slide, le logo lu par l'OCR ni les lignes "
+                        "répétées sur de nombreuses pages (pied de page)")
     p.add_argument("--no-cell-matching", action="store_true",
                    help="TableFormer sans cell matching (à tester si les tableaux sont décalés)")
     p.add_argument("-v", "--verbose", action="store_true")

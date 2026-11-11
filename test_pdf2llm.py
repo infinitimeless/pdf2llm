@@ -755,6 +755,27 @@ def test_v9_t8_client_vlm_erreurs_et_coupe_circuit():
         p.requests.post, p.time.sleep = orig_post, orig_sleep
 
 
+def test_v9_t9_lignes_repetees_retirees():
+    pages = []
+    for n in range(1, 11):
+        pages.append(f"## Slide {n}\n\nEnsemble des Français : {n + 3}%\n\n"
+                     f"Ipsos | Fractures françaises 2026 | {n}\n\n"
+                     "Base : ensemble des Français\n\n| Oui | 52% |\n|---|---|\n\n"
+                     "*Valeurs lues dans l'image sans libellé établi : 12%*\n\n"
+                     "```mermaid\nflowchart TD\n  A[Étape commune] --> B[Fin]\n```")
+    md = "\n\n".join(pages)
+    out, removed = p.repeated_lines(md, 10)
+    assert removed == {"Ipsos | Fractures françaises 2026 | 1": 9}, removed
+    # valeur qui varie (pourcentage) : jamais prise pour un pied de page
+    assert out.count("Fractures") == 1 and out.count("Ensemble des Français") == 10
+    assert out.count("Base : ensemble des Français") == 10            # métadonnée gardée
+    assert out.count("| Oui | 52% |") == 10 and out.count("A[Étape commune]") == 10
+    assert out.count("*Valeurs lues") == 10 and out.count("## Slide") == 10
+    # sous le seuil max(5, 30 % des pages) : rien n'est retiré
+    assert p.repeated_lines("\n\n".join(pages[:4]), 4)[1] == {}
+    assert p.repeated_lines(md, 40)[1] == {}                         # 10 < 30 % de 40
+
+
 # --------------------------------------------------------------------------------------
 # Golden : sortie complète comparée à une version validée (tools/golden.py)
 # --------------------------------------------------------------------------------------
