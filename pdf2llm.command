@@ -26,5 +26,12 @@ if ! "$PY" -c "import docling, pypdfium2, rich" >/dev/null 2>&1; then
 fi
 
 "$PY" pdf2llm.py
+CODE=$?
 echo
-read "?Terminé. Entrée pour fermer cette fenêtre… "
+# 0 : terminé ; 2 : terminé avec avertissements (voir les *.report.json) ; autre : erreur
+case $CODE in
+  0) MSG="Terminé." ;;
+  2) MSG="Terminé avec avertissements (détail dans les fichiers *.report.json)." ;;
+  *) MSG="Terminé avec des erreurs (code $CODE) : voir les messages ci-dessus." ;;
+esac
+read "?$MSG Entrée pour fermer cette fenêtre… "

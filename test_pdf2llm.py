@@ -776,6 +776,27 @@ def test_v9_t9_lignes_repetees_retirees():
     assert p.repeated_lines(md, 40)[1] == {}                         # 10 < 30 % de 40
 
 
+def test_v9_t10_codes_de_sortie():
+    _, tmp = _vec()
+    _pdf([_txt(60, 400, "x")], tmp / "a.pdf")
+    orig = p.process_pdf
+    outcomes = {}
+
+    def fake(pdf, out_dir, pool, vlm, args):
+        o = outcomes["next"]
+        if o == "échec":
+            raise RuntimeError("PDF illisible")
+        return p.DocReport(pdf=pdf.name, warnings=["p. 1 : avertissement"] if o == "avert" else [])
+    p.process_pdf = fake
+    try:
+        argv = [str(tmp / "a.pdf"), str(tmp / "out"), "--no-vlm", "--force"]
+        for o, code in (("ok", 0), ("avert", 2), ("échec", 1)):
+            outcomes["next"] = o
+            assert p.main(argv) == code, o
+    finally:
+        p.process_pdf = orig
+
+
 # --------------------------------------------------------------------------------------
 # Golden : sortie complète comparée à une version validée (tools/golden.py)
 # --------------------------------------------------------------------------------------

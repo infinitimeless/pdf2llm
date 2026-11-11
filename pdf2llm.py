@@ -1920,6 +1920,12 @@ def process_pdf(pdf: Path, out_dir: Path, pool: ConverterPool,
     return rep
 
 
+# Codes de sortie (v9) : 0 = tout converti sans avertissement ; 1 = au moins un PDF en
+# échec ; 2 = tout converti, mais au moins un rapport a des avertissements (tableau
+# irrégulier, PDF sans couche texte, incohérence, désaccord Granite / VLM, coupe-circuit).
+EXIT_OK, EXIT_FAILURE, EXIT_WARNINGS = 0, 1, 2
+
+
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
@@ -2080,8 +2086,16 @@ def run(ap: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     summary_path.write_text(json.dumps(prev + reports, ensure_ascii=False, indent=2), "utf-8")
     if failures:
         log.warning("Échecs (%d) : %s", len(failures), ", ".join(failures))
+        log.info("Terminé. Résumé : %s", summary_path)
+        return EXIT_FAILURE
+    warned = [r["pdf"] for r in reports if r.get("warnings")]
+    if warned:
+        log.warning("Terminé avec avertissements (%d PDF : %s) : voir les *.report.json",
+                    len(warned), ", ".join(warned))
+        log.info("Résumé : %s", summary_path)
+        return EXIT_WARNINGS
     log.info("Terminé. Résumé : %s", summary_path)
-    return 1 if failures else 0
+    return EXIT_OK
 
 
 if __name__ == "__main__":
