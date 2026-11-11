@@ -1,6 +1,6 @@
 # pdf2llm.py : note de débogage n° 6 (11 novembre 2026)
 
-Remplace la note n° 5. **État du code : v9** = v8.2 (format commun des graphiques, lecture vectorielle étendue) + plan v9 (`PLAN_v9.md`) : durées par étape et pic de RAM, tests golden, ligne de provenance « Lecture : », PDF sans couche texte, contrôles de cohérence, double lecture Granite × modèle vision, rendu libéré dans `VectorPage`, client VLM avec coupe-circuit, pieds de page répétés, codes de sortie. `PROMPT_VERSION = "v5"` : les consignes du modèle vision n'ont pas changé, le cache reste valable. Vérifications de la v9 : § 6 ; celles des versions précédentes suivent.
+Remplace la note n° 5. **État du code : v9** = v8.2 (format commun des graphiques, lecture vectorielle étendue) + plan v9 (`PLAN_v9.md`) : durées par étape et pic de RAM, tests golden, ligne de provenance « Lecture : », PDF sans couche texte, contrôles de cohérence, double lecture Granite × modèle vision, rendu libéré dans `VectorPage`, client VLM avec coupe-circuit, pieds de page répétés, codes de sortie, repli Granite sans reconversion. `PROMPT_VERSION = "v5"` : les consignes du modèle vision n'ont pas changé, le cache reste valable. Vérifications de la v9 : § 6 ; celles des versions précédentes suivent.
 
 ---
 
@@ -63,6 +63,7 @@ Fichier de développement : sondage Ifop de 21 pages au format slides, pages 1 �
 | Client VLM (v9, T8) | Toute erreur réessayée 3 fois ; LM Studio arrêté = 3 délais de 180 s par image | 4xx (sauf 408/429) non réessayé, corps journalisé une fois ; coupe-circuit après 3 images d'affilée en échec de connexion ou de délai, avertissement par PDF | Tests unitaires (requests.post simulé) |
 | Pied de page (v9, T9) | Pied de page Ipsos sur 123 slides sur 128 (§ 5) | `repeated_lines` : ligne normalisée (sans chiffres) présente sur max(5, 30 % des pages) ; tableaux, titres, code, images, italiques, puces, métadonnées jamais touchés ; un seul nombre peut varier, entier nu ; 1re occurrence gardée ; `lignes_repetees_retirees` dans le rapport | Test unitaire ; corpus local (§ 6) |
 | Codes de sortie (v9, T10) | Fin « OK » même avec des avertissements | 0 / 1 (échec) / 2 (avertissements) ; `pdf2llm.command` affiche « terminé avec avertissements » | Test unitaire |
+| Granite sans reconversion (v9, T11) | Le repli Granite reconvertissait les pages concernées (mise en page, TableFormer, OCR, classement) puis rapprochait les tableaux des images par IoU, et Granite lisait tous les graphiques de ces pages, même ceux déjà lus en vectoriel | `granite_read` appelle directement l'étape `ChartExtractionVlmEngineModel` de Docling sur les seuls graphiques non lus du document principal ; plus de second convertisseur ni d'IoU ; les champs meta du document sont restaurés après lecture | Markdown identique sur les 8 PDF d'essai (ancien code contre nouveau, Granite actif, sans VLM) ; goldens locaux 11/11 ; temps Granite 303 s → 223 s |
 
 ## 4. Ce qu'on a appris (à ne pas redécouvrir)
 
@@ -103,12 +104,14 @@ Fichier de développement : sondage Ifop de 21 pages au format slides, pages 1 �
 8. Le deck Ipsos de 68 pages, l'Ifop p. 1-15 et le rapport de l'Assemblée nationale n'étaient pas disponibles : les mesures demandées sur ces PDF (T7, T6 sur Ipsos p. 55-60, garde de T11) ont été faites sur le corpus d'essai.
 9. Tests : 40, dont le golden synthétique (3 decks) ; 2 sautés sans fichiers locaux (`PDF2LLM_TEST_PDF`, `PDF2LLM_GOLDEN_DIR`).
 
-### T11 : repli Granite sans reconversion (étude, non implémentée)
+### T11 : repli Granite sans reconversion (implémenté)
 
 - **Garde** : Granite = 69 % du temps total sur le corpus d'essai (> 25 %).
 - **Faisable** : `ChartExtractionVlmEngineModel` (Docling 2.149, `models/stages/chart_extraction/granite_vision.py`) est un `BaseItemAndImageEnrichmentModel` : on peut le construire une fois comme `base_pipeline.py` (`enabled=True, artifacts_path, options=po.chart_extraction_options, accelerator_options, enable_remote_services`) et l'appeler sur les `PictureItem` du document principal : `model(doc, [ItemAndImageEnrichmentElement(item=pic, image=images[ref])])`. Il ne demande que la classification (déjà faite) et remplit `pic.meta.tabular_chart`. Son `prepare_element` prend lui-même `element.get_image(doc)` : même image qu'aujourd'hui, donc mêmes tableaux attendus. Le rapprochement par IoU deviendrait inutile.
 - **Gain mesuré** : la reconversion (mise en page, TableFormer, OCR, classement des pages de repli) pèse 59 s sur 279 s de « granite » (21 %), soit environ 15 % du temps total. Les 79 % restants sont l'inférence Granite elle-même, inchangée.
-- **Décision laissée à l'utilisateur** (le plan demande de s'arrêter ici).
+- **Feu vert de l'utilisateur**, puis implémentation : `ConverterPool.granite_model()` construit l'étape une fois (mêmes options que le pipeline : `pipeline_options(args, charts=True)`), `granite_read(doc, pics, model)` ne lui envoie que les graphiques en attente.
+- **Résultat (8 PDF d'essai, `--no-vlm`, ancien code contre nouveau)** : Markdown identique octet pour octet sur les 8 ; mêmes `granite_pages`, actions et avertissements. Temps « granite » 302,6 s → 223,4 s (−26 %), temps total 427 s → 347 s (−19 %). Le gain dépasse les 21 % estimés : en plus de la reconversion, Granite ne lit plus les graphiques déjà lus en vectoriel sur les mêmes pages (scan_yanbao : 14,5 s → 4,9 s).
+- **RAM** : `ram_max_mo` passe de 4,1 Go à 9,6 Go dans les rapports, mais la mémoire réelle ne change pas : mesurés isolément sur Enquête p. 4-6, les deux chemins atteignent le même pic MLX (`mx.get_peak_memory()` = 9,81 Go) et environ 11 Go de RSS. L'ancien chiffre de 4,1 Go ne comptait pas la mémoire Metal de Granite. `ram_max_mo` sous-estime donc la mémoire de Granite MLX selon le chemin d'appel : à lire comme un ordre de grandeur.
 
 ## 6 bis. Vérifications de l'essai 9 (v7)
 
@@ -140,7 +143,7 @@ Fichier de développement : sondage Ifop de 21 pages au format slides, pages 1 �
 4. **Contrôle automatique des pertes** : pour chaque page, part des nombres de la couche texte visible retrouvés dans le Markdown, et nombres du Markdown absents de la page. À inscrire dans `report.json`. (Fait en v9 : sommes à 100 % et totaux, `controles.py`, en signalement seulement.)
 5. Essai sur le rapport Ipsos de 128 slides (tableaux denses, courbes, pied de page répété), puis sur un rapport textuel. Ajouter la lecture des **courbes** (couleur du texte des valeurs = couleur du titre de la série).
 6. Le correctif P1 vise une fonction interne de Docling 2.149 : garder la version de `requirements.lock` (le script avertit et continue si la fonction disparaît). **Vérifié le 11 novembre 2026 : Docling 2.150.0 (dernière version PyPI) et la branche `main` lisent toujours le CSV de Granite avec `pd.read_csv` strict.** Brouillon de correctif amont : `upstream/docling-granite-csv.md` (rien n'a été ouvert).
-7. Performance : mesurée en v9 (`durees`, `ram_max_mo`) : voir § 6. Granite domine (environ 70 % du temps sur le corpus d'essai) ; piste T11 ci-dessous.
+7. Performance : mesurée en v9 (`durees`, `ram_max_mo`) : voir § 6. Granite domine (environ 70 % du temps sur le corpus d'essai) ; T11 (sans reconversion) en retire 26 %, le reste est l'inférence Granite elle-même.
 
 ## 8. Messages sans gravité dans les logs
 

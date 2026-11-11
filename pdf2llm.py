@@ -9,7 +9,7 @@ Pipeline (tout local, open source) :
      Avant cela, si le graphique est VECTORIEL (formes + texte du PDF, cas des slides
      exportées de PowerPoint), il est lu exactement par la géométrie (vector_charts.py),
      sans modèle ; Granite et le modèle vision ne servent qu'en repli. Granite n'est
-     exécuté que sur les pages dont un graphique n'a pas été lu (granite_fallback).
+     exécuté que sur les graphiques qui n'ont pas été lus (granite_read).
   0. Avant tout, un triage (pypdfium2) classe le PDF : texte, présentation ou scan.
   4. Logos, icônes, signatures, QR codes, images répétées, miniatures -> supprimés.
   5. Schémas et autres images -> envoyés à un modèle vision (LM Studio, Ollama, ou toute API
@@ -1045,7 +1045,7 @@ class DocReport:
     md_tokens_est: int = 0
     noise_lines_removed: int = 0
     kind: str = ""                # triage : texte | présentation | scan
-    granite_pages: list[int] = field(default_factory=list)   # pages reconverties par Granite
+    granite_pages: list[int] = field(default_factory=list)   # pages des graphiques lus par Granite
     vector_tables: int = 0        # « tableaux » Docling relus comme graphiques vectoriels
     lignes_repetees_retirees: dict[str, int] = field(default_factory=dict)  # pied de page...
     durees: dict[str, float] = field(default_factory=dict)   # secondes par étape (STAGES)
@@ -1302,8 +1302,8 @@ def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClie
                     granite: Any = None, chrono: Chrono | None = None,
                     scan: bool = False) -> dict[str, PicDecision]:
     """Décide du sort de chaque image. `vec` : lecture vectorielle (prioritaire).
-    `granite(pages) -> {page: [(boîte, tabular_chart)]}` : repli Granite Vision appelé
-    une seule fois, pour les pages dont un graphique n'a pas été lu en vectoriel.
+    `granite(pics) -> {self_ref: tabular_chart}` : repli Granite Vision appelé une
+    seule fois, sur les graphiques qui n'ont pas été lus en vectoriel.
     `chrono` : cumul des durées des étapes vectoriel, granite et vlm. `scan` : PDF sans
     couche texte (chiffres invérifiables, voir --scan-charts)."""
     chrono = chrono or Chrono()
@@ -1373,23 +1373,18 @@ def decide_pictures(doc: DoclingDocument, args: argparse.Namespace, vlm: VlmClie
                 d.note = f"lecture vectorielle impossible : {vec.last_reason}"
         rest.append(pic)
 
-    # 2) Repli Granite Vision, seulement pour les pages dont un graphique n'a pas été lu
-    #    en vectoriel (le convertisseur principal n'exécute plus Granite).
+    # 2) Repli Granite Vision, seulement pour les graphiques qui n'ont pas été lus en
+    #    vectoriel, directement sur les images du document (v9-T11 : plus de reconversion).
     tabular: dict[str, Any] = {}
     pending = [p for p in rest if decisions[p.self_ref].label in CHART_LABELS
                and decisions[p.self_ref].page]
     if pending and granite is not None:
         try:
             with chrono("granite"):
-                found = granite({decisions[p.self_ref].page for p in pending})
+                tabular = granite(pending)
         except Exception as e:  # noqa: BLE001
             log.warning("Repli Granite Vision impossible : %s", e)
-            found = {}
-        for p in pending:
-            box = bottom_left_bbox(doc, p)
-            cands = [(_iou(box, b), tc) for b, tc in found.get(decisions[p.self_ref].page, [])]
-            if cands and max(cands, key=lambda x: x[0])[0] >= 0.5:
-                tabular[p.self_ref] = max(cands, key=lambda x: x[0])[1]
+            tabular = {}
 
     # 3) Chemin habituel pour ce qui reste : tableau Granite contrôlé, texte de la
     #    couche PDF pour les camemberts, légende sans valeur, modèle vision.
@@ -1629,11 +1624,12 @@ def doc_to_markdown(doc: DoclingDocument, decisions: dict[str, PicDecision],
 # --------------------------------------------------------------------------------------
 # Conversion
 # --------------------------------------------------------------------------------------
-def build_converter(args: argparse.Namespace, ocr: bool = True,
-                    charts: bool = False) -> DocumentConverter:
-    """Convertisseur Docling. `ocr` : OCR sélectif de Docling (régions sans texte PDF,
-    pages au texte cassé). `charts` : extraction des graphiques par Granite Vision,
-    réservée au repli (voir ConverterPool)."""
+def pipeline_options(args: argparse.Namespace, ocr: bool = True,
+                     charts: bool = False) -> PdfPipelineOptions:
+    """Options du pipeline Docling. `ocr` : OCR sélectif de Docling (régions sans texte
+    PDF, pages au texte cassé). `charts` : options d'extraction des graphiques par Granite
+    Vision ; depuis v9-T11 elles ne servent qu'à construire le modèle appelé directement
+    (ConverterPool.granite_model), le convertisseur n'exécute jamais Granite."""
     po = PdfPipelineOptions()
     po.do_ocr = ocr and not args.no_ocr
     po.do_table_structure = True
@@ -1679,6 +1675,13 @@ def build_converter(args: argparse.Namespace, ocr: bool = True,
             )
             po.chart_extraction_options = ChartExtractionVlmEngineOptions.from_preset(
                 "granite_vision_v4_mlx")
+    return po
+
+
+def build_converter(args: argparse.Namespace, ocr: bool = True,
+                    charts: bool = False) -> DocumentConverter:
+    """Convertisseur Docling (voir pipeline_options)."""
+    po = pipeline_options(args, ocr, charts)
     return DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=po)})
 
 
@@ -1732,48 +1735,66 @@ def pdf_kind(profiles: list[PageProfile]) -> str:
 
 
 class ConverterPool:
-    """Convertisseurs Docling créés à la demande et réutilisés d'un PDF à l'autre : le
-    principal (sans Granite) et celui de repli avec Granite Vision. Granite n'est donc
-    chargé que si un graphique résiste à la lecture vectorielle."""
+    """Convertisseur Docling principal (sans Granite) et modèle Granite Vision, créés à la
+    demande et réutilisés d'un PDF à l'autre. Granite n'est donc chargé que si un
+    graphique résiste à la lecture vectorielle."""
 
     def __init__(self, args: argparse.Namespace):
         self.args = args
-        self._pool: dict[bool, DocumentConverter] = {}
+        self._conv: DocumentConverter | None = None
+        self._granite: Any = None
 
-    def get(self, charts: bool = False) -> DocumentConverter:
-        if charts not in self._pool:
-            self._pool[charts] = build_converter(self.args, ocr=True, charts=charts)
-        return self._pool[charts]
+    def get(self) -> DocumentConverter:
+        if self._conv is None:
+            self._conv = build_converter(self.args, ocr=True)
+        return self._conv
+
+    def granite_model(self) -> Any:
+        """Étape d'extraction de graphiques de Docling (ChartExtractionVlmEngineModel),
+        construite comme le ferait le pipeline avec do_chart_extraction=True."""
+        if self._granite is None:
+            from docling.datamodel.settings import settings
+            from docling.models.stages.chart_extraction.granite_vision import (
+                ChartExtractionVlmEngineModel,
+            )
+            po = pipeline_options(self.args, ocr=True, charts=True)
+            art = po.artifacts_path or settings.artifacts_path
+            self._granite = ChartExtractionVlmEngineModel(
+                enabled=True,
+                artifacts_path=Path(art).expanduser() if art is not None else None,
+                options=po.chart_extraction_options,
+                accelerator_options=po.accelerator_options,
+                enable_remote_services=po.enable_remote_services,
+            )
+        return self._granite
 
 
-def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
-    l, bo, r, t = max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3])
-    inter = max(0.0, r - l) * max(0.0, t - bo)
-    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
-    return inter / union if union > 0 else 0.0
-
-
-def granite_fallback(pdf: Path, pool: ConverterPool, pages: set[int]) -> dict[int, list]:
-    """Repli Granite Vision : reconvertit seulement les pages dont un graphique n'a pas
-    été lu en vectoriel, avec l'extraction de graphiques activée. Renvoie, par page, les
-    (boîte, tabular_chart) trouvés, à rapprocher des images du document principal."""
-    out: dict[int, list] = {}
-    runs: list[list[int]] = []
-    for p in sorted(pages):
-        if runs and p == runs[-1][-1] + 1:
-            runs[-1].append(p)
-        else:
-            runs.append([p])
-    conv = pool.get(charts=True)
-    for run in runs:
-        log.info("    Granite Vision (repli) : pages %d-%d", run[0], run[-1])
-        doc = conv.convert(pdf, page_range=(run[0], run[-1])).document
-        for it, _ in doc.iterate_items():
-            if not isinstance(it, PictureItem) or not it.prov:
-                continue
-            tc = getattr(getattr(it, "meta", None), "tabular_chart", None)
-            if tc is not None:
-                out.setdefault(it.prov[0].page_no, []).append((bottom_left_bbox(doc, it), tc))
+def granite_read(doc: DoclingDocument, pics: list[PictureItem], model: Any) -> dict[str, Any]:
+    """Repli Granite Vision sur les images du document principal, sans reconvertir les
+    pages (v9-T11). Le pipeline Docling passe à Granite l'image de l'élément
+    (`get_image`, générée car generate_picture_images=True) : l'entrée est la même
+    qu'avec l'ancienne reconversion. Renvoie {self_ref: tabular_chart} ; les champs meta
+    du document sont remis dans leur état d'origine."""
+    from docling.datamodel.base_models import ItemAndImageEnrichmentElement
+    batch, saved = [], []
+    for p in pics:
+        if not model.is_processable(doc, p):
+            continue
+        img = p.get_image(doc)
+        if img is None:
+            continue
+        m = p.meta
+        saved.append((p, m.tabular_chart, m.description, m.code))
+        batch.append(ItemAndImageEnrichmentElement(item=p, image=img))
+    out: dict[str, Any] = {}
+    size = max(1, getattr(model, "elements_batch_size", len(batch)) or len(batch))
+    for i in range(0, len(batch), size):
+        for _ in model(doc=doc, element_batch=batch[i:i + size]):
+            pass
+    for p, tc, desc, code in saved:
+        if p.meta.tabular_chart is not None:
+            out[p.self_ref] = p.meta.tabular_chart
+        p.meta.tabular_chart, p.meta.description, p.meta.code = tc, desc, code
     return out
 
 
@@ -1849,13 +1870,16 @@ def process_pdf(pdf: Path, out_dir: Path, pool: ConverterPool,
         except Exception as e:  # noqa: BLE001
             log.warning("Lecture vectorielle désactivée pour ce PDF : %s", e)
 
-    def granite(pages: set[int]) -> dict[int, list]:
+    def granite(pics: list[PictureItem]) -> dict[str, Any]:
         if args.charts != "docling":
             return {}
-        rep.granite_pages.extend(sorted(pages))
-        return granite_fallback(pdf, pool, pages)
+        pages = sorted({p.prov[0].page_no for p in pics if p.prov})
+        rep.granite_pages.extend(pages)
+        log.info("    Granite Vision (repli) : %d graphique(s), pages %s", len(pics),
+                 ", ".join(map(str, pages)))
+        return granite_read(doc, pics, pool.granite_model())
 
-    converter = pool.get(charts=False)
+    converter = pool.get()
     for start in range(first, last + 1, chunk):
         end = min(last, start + chunk - 1)
         log.info("  pages %d-%d / %d", start, end, total)

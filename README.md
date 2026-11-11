@@ -87,7 +87,7 @@ A screenshot, a scan, or an image "exported to PDF" has no text layer: the repor
 ### Triage and Granite Vision fallback
 
 - **Triage**: before conversion, each PDF is profiled in a few milliseconds (text per page, images, shapes) and labelled `texte`, `présentation` or `scan` (report field `kind`).
-- **Granite Vision is only a fallback**: the main conversion no longer runs it. Only pages where a chart could not be read as vector are converted again with Granite (report field `granite_pages`). A text PDF therefore never loads Granite, and the 15 test slides went from 167 s to 22 s.
+- **Granite Vision is only a fallback**: the main conversion no longer runs it. Granite runs only on the charts that could not be read as vector, directly on the picture images of the main conversion: pages are no longer converted a second time (v9). The pages concerned are listed in the report field `granite_pages`. A text PDF therefore never loads Granite, and the 15 test slides went from 167 s to 22 s.
 - **OCR stays on everywhere**: Docling's OCR is selective (regions without PDF text, pages with broken or scanned text) and costs only about 5 s per PDF. Measured on a pure-text report, turning it off loses headings that are present in the PDF.
 
 ### Quality checks
@@ -194,13 +194,13 @@ Fields of `name.report.json`:
 |---|---|
 | `kind` | `texte`, `présentation` or `scan` |
 | `actions`, `labels` | Decision per picture (`vector`, `chart_table`, `vlm`…) and picture classes |
-| `granite_pages` | Pages converted again with Granite Vision |
+| `granite_pages` | Pages with at least one chart read by Granite Vision |
 | `vector_tables` | Docling "tables" re-read as vector charts |
 | `md_chars`, `md_tokens_est`, `webp_bytes` | Output size |
 | `noise_lines_removed` | Slide numbers and OCR logo lines removed |
 | `lignes_repetees_retirees` | Repeated footer/header lines removed: `{text of the first occurrence: copies removed}` |
 | `durees` | Seconds per stage: `triage`, `docling`, `vectoriel`, `granite`, `vlm` (including cross-checks), `tableaux` (including vision model re-reads of tables), `serialisation` |
-| `ram_max_mo` | Peak resident memory of the process so far, in MB |
+| `ram_max_mo` | Peak resident memory of the process so far, in MB (an order of magnitude: on Apple Silicon it may leave out the Metal memory used by Granite MLX) |
 | `seconds` | Total time for the PDF |
 | `warnings` | Warnings: irregular table (to check, fixed without a model, or re-read by the vision model), scan, inconsistency, cross-check disagreement, circuit breaker, vector self-test failure |
 
@@ -278,7 +278,7 @@ These files are not committed. The expected values match that PDF.
 | Granite patch | `tolerant_csv_to_dataframe` replaces an internal Docling 2.149 function (labels with a comma); upstream draft in `upstream/docling-granite-csv.md` |
 | Per-picture decision | `decide_pictures`: vector reading first, then the usual decision tree, Granite × vision model cross-check (`compare_readings`, `apply_cross_check`), parallel vision model calls |
 | Serialisation | Docling Markdown serializers overridden to substitute pictures and tables |
-| Triage, Granite fallback | `profile_pages`, `pdf_kind`, `ConverterPool` (converters built on demand), `granite_fallback` (re-converts only the pages with an unread chart) |
+| Triage, Granite fallback | `profile_pages`, `pdf_kind`, `ConverterPool` (converter and Granite model built on demand), `granite_read` (runs Docling's chart-extraction stage on the unread charts of the main document) |
 | Conversion, `main` | Converter options, chunking, timings (`Chrono`), reports, resume, exit codes; `build_parser` / `run` |
 | `tools/golden.py`, `tests/` | Golden tests: runner, synthetic deck generator, shared PDF builders (`tests/pdfgen.py`), expected outputs |
 

@@ -388,22 +388,62 @@ def test_triage_profil_depuis_un_pdf():
 
 
 def test_granite_hors_du_convertisseur_principal():
-    """Le convertisseur principal n'exécute plus Granite ; seul celui de repli le fait."""
+    """Le convertisseur n'exécute jamais Granite ; ses options ne servent qu'au modèle
+    appelé directement sur les images (v9-T11)."""
     from docling.datamodel.base_models import InputFormat
     args = NS(no_ocr=False, no_cell_matching=False, no_vlm=True, no_table_fallback=False,
               images_scale=2.0, charts="docling", chart_api_url=None, mlx=False)
     opts = lambda c: c.format_to_options[InputFormat.PDF].pipeline_options  # noqa: E731
     assert opts(p.build_converter(args)).do_chart_extraction is False
-    assert opts(p.build_converter(args, charts=True)).do_chart_extraction is True
+    assert p.pipeline_options(args, charts=True).do_chart_extraction is True
     assert opts(p.build_converter(args)).do_ocr is True
     pool = p.ConverterPool(args)
-    assert pool.get() is pool.get() and pool.get(charts=True) is not pool.get()
+    assert pool.get() is pool.get()
 
 
-def test_granite_rapprochement_des_boites():
-    assert p._iou((0, 0, 10, 10), (0, 0, 10, 10)) == 1
-    assert p._iou((0, 0, 10, 10), (20, 20, 30, 30)) == 0
-    assert 0.6 < p._iou((0, 0, 10, 10), (1, 1, 10, 11)) < 0.95
+def test_v9_t11_granite_sur_les_images_du_document():
+    """Granite lit les images du document principal : seuls les graphiques reconnus par
+    l'étape sont envoyés, le résultat est indexé par self_ref, les meta sont restaurées."""
+    from docling_core.types.doc import PictureItem
+
+    class Meta:
+        def __init__(self):
+            self.tabular_chart = self.description = self.code = None
+
+    class Pic:
+        def __init__(self, ref, ok):
+            self.self_ref, self.ok, self.meta = ref, ok, Meta()
+
+        def get_image(self, doc):
+            return "img-" + self.self_ref
+
+    class Model:
+        elements_batch_size = 1
+        seen: list = []
+
+        def is_processable(self, doc, el):
+            return el.ok
+
+        def __call__(self, doc, element_batch):
+            for el in element_batch:
+                self.seen.append(el.image)
+                el.item.meta.tabular_chart = "tc-" + el.item.self_ref
+                el.item.meta.description = "desc"
+                yield el.item
+
+    import docling.datamodel.base_models as bm
+    real = bm.ItemAndImageEnrichmentElement
+    bm.ItemAndImageEnrichmentElement = lambda item, image: NS(item=item, image=image)
+    try:
+        a, b, c = Pic("#/pictures/0", True), Pic("#/pictures/1", False), Pic("#/pictures/2", True)
+        m = Model()
+        out = p.granite_read(None, [a, b, c], m)
+    finally:
+        bm.ItemAndImageEnrichmentElement = real
+    assert out == {"#/pictures/0": "tc-#/pictures/0", "#/pictures/2": "tc-#/pictures/2"}
+    assert m.seen == ["img-#/pictures/0", "img-#/pictures/2"]
+    assert all(x.meta.tabular_chart is None and x.meta.description is None for x in (a, b, c))
+    assert PictureItem  # import réel de docling_core disponible
 
 
 # --------------------------------------------------------------------------------------
